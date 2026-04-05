@@ -1,987 +1,414 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-import { useEffect, useRef, useState } from 'react';
-import {
-  type WorkshopInputSample,
-  getDefaultPromptArguments as getSharedDefaultPromptArguments,
-  getDefaultToolArguments as getSharedDefaultToolArguments,
-  getPromptInputSamples,
-  getToolInputSamples,
-} from './lib/workshopSamples';
+import React, { useState, useRef, useEffect } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import { ChevronRight, FileText, Scale, CheckSquare, MessageSquare, Plus, RefreshCw, Send, AlertTriangle } from 'lucide-react';
 
-type ToolSummary = {
-  name: string;
-  description?: string;
-  defaultArguments?: Record<string, unknown>;
-  samples?: WorkshopInputSample[];
-  inputSchema?: {
-    properties?: Record<string, unknown>;
-    required?: string[];
-  };
-};
-
-type ResourceSummary = {
-  uri: string;
-  name: string;
-};
-
-type PromptSummary = {
-  name: string;
-  defaultArguments?: Record<string, unknown>;
-  samples?: WorkshopInputSample[];
-  arguments?: Array<{
-    name: string;
-    required?: boolean;
-  }>;
-};
-
-type CatalogResponse = {
-  tools: ToolSummary[];
-  resources: ResourceSummary[];
-  prompts: PromptSummary[];
-};
-
-type OutputState = {
-  status: 'idle' | 'loading' | 'ready' | 'error';
-  label: string;
-  payload: unknown;
-};
-
-type DisplayMeta = {
-  title: string;
-  description: string;
-};
-
+// --- API Utils ---
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-
   const payload = (await response.json()) as T & { error?: string };
-
-  if (!response.ok) {
-    throw new Error(payload.error || `Request failed (${response.status})`);
-  }
-
+  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
   return payload;
 }
 
-function formatJson(value: unknown): string {
-  return JSON.stringify(value, null, 2);
-}
+// --- Types ---
+type Issue = { issue_code?: string; label: string; confidence?: number; reason?: string };
+type LawCandidate = { law_title: string; relevance_score?: number; why_relevant?: string };
+type ChecklistItem = { item?: string; priority?: string; why_needed?: string; question_to_client?: string };
+type DraftReply = { subject: string; body: string; disclaimer_flags?: string[]; review_notes?: string[] };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function tryParseJsonText(text: string): unknown {
-  const trimmed = text.trim();
-
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
-    return text;
-  }
-
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    return text;
-  }
-}
-
-function formatLabel(label: string): string {
-  return label
-    .replace(/_/g, ' ')
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-const TOOL_DISPLAY_META: Record<string, DisplayMeta> = {
-  run_full_case_workflow: {
-    title: '相談全体をまとめて整理',
-    description: '論点抽出、関連法令、条文確認、不足情報、一次返信案まで一括で流すぜ。',
-  },
-  extract_issues_from_consultation: {
-    title: '相談内容から論点を抽出',
-    description: '相談文を読み、許認可や確認ポイントの候補を洗い出すぜ。',
-  },
-  search_relevant_laws: {
-    title: '関連法令の候補を探す',
-    description: '論点やキーワードから、当たりを付ける法令候補を整理するんな。',
-  },
-  trace_articles_and_references: {
-    title: '条文と参照先をたどる',
-    description: '起点条文から参照条文や委任先を追って、読む順番を組み立てるぜ。',
-  },
-  generate_missing_info_checklist: {
-    title: '不足情報のヒアリング項目を作る',
-    description: '初回相談で追加確認すべき資料や質問をチェックリスト化するんな。',
-  },
-  draft_initial_client_reply: {
-    title: '顧客向けの一次返信案を作る',
-    description: '確認前提の慎重な初回返信文を下書きするぜ。',
-  },
+type CaseData = {
+  issues: Issue[];
+  lawCandidates: LawCandidate[];
+  checklist: ChecklistItem[];
+  draftReply: DraftReply;
+  missingFacts: string[];
 };
 
-const RESOURCE_DISPLAY_META: Record<string, DisplayMeta> = {
-  'resource://domains/common_issue_patterns': {
-    title: 'よくある論点パターン集',
-    description: '業種ごとの典型論点やキーワードのメモだぜ。',
-  },
-  'resource://templates/client_reply_cautions': {
-    title: '返信文で使う注意表現',
-    description: '断定を避ける言い回しや、安全側の表現集だんな。',
-  },
-  'resource://runtime/llm_runtime_config': {
-    title: 'LLM実行設定',
-    description: '今どのモデル系統で動かしているか確認できるぜ。',
-  },
-  'resource://safety/human_review_rules': {
-    title: '人間レビューの安全ルール',
-    description: '送信前に人が見るべき判断基準をまとめたものだぜ。',
-  },
-};
+export default function App() {
+  const [stage, setStage] = useState<'intake' | 'analyzing' | 'dashboard'>('intake');
+  const [clientName, setClientName] = useState('');
+  const [consultationText, setConsultationText] = useState('');
+  const [caseData, setCaseData] = useState<CaseData | null>(null);
+  const [brushUpText, setBrushUpText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<{role: 'user' | 'assistant', content: string}[]>([]);
 
-const PROMPT_DISPLAY_META: Record<string, DisplayMeta> = {
-  new_case_triage: {
-    title: '新規相談の整理プロンプト',
-    description: '論点抽出から一次返信までの流れをまとめて指示するんな。',
-  },
-  safe_initial_reply: {
-    title: '安全な一次返信テンプレ',
-    description: '断定を避けた返信を作るための基本指示だぜ。',
-  },
-};
+  const handleStartAnalysis = async (e?: React.FormEvent, isBrushUp = false) => {
+    if (e) e.preventDefault();
+    if (!consultationText.trim() && !isBrushUp) return;
+    if (isBrushUp && !brushUpText.trim()) return;
 
-function getToolDisplayMeta(tool: ToolSummary): DisplayMeta {
-  return TOOL_DISPLAY_META[tool.name] ?? {
-    title: tool.name,
-    description: tool.description || 'この tool の表示説明はまだ未設定だぜ。',
-  };
-}
+    setError(null);
+    setStage('analyzing');
 
-function getResourceDisplayMeta(resource: ResourceSummary): DisplayMeta {
-  return RESOURCE_DISPLAY_META[resource.uri] ?? {
-    title: resource.name,
-    description: 'この resource の表示説明はまだ未設定だぜ。',
-  };
-}
-
-function getPromptDisplayMeta(prompt: PromptSummary): DisplayMeta {
-  return PROMPT_DISPLAY_META[prompt.name] ?? {
-    title: prompt.name,
-    description: 'この prompt の表示説明はまだ未設定だぜ。',
-  };
-}
-
-function toDisplayBlocks(payload: unknown): Array<{ title: string; value: unknown }> {
-  if (!payload) {
-    return [];
-  }
-
-  if (typeof payload === 'string') {
-    return [{ title: 'Message', value: tryParseJsonText(payload) }];
-  }
-
-  if (!isRecord(payload)) {
-    return [{ title: 'Result', value: payload }];
-  }
-
-  if (Array.isArray(payload.content)) {
-    return payload.content.map((item, index) => {
-      if (isRecord(item) && typeof item.text === 'string') {
-        return {
-          title: item.type === 'text' ? `Content ${index + 1}` : `Item ${index + 1}`,
-          value: tryParseJsonText(item.text),
-        };
-      }
-
-      return { title: `Content ${index + 1}`, value: item };
-    });
-  }
-
-  if (Array.isArray(payload.contents)) {
-    return payload.contents.map((item, index) => {
-      if (isRecord(item) && typeof item.text === 'string') {
-        return {
-          title: typeof item.uri === 'string' ? item.uri : `Resource ${index + 1}`,
-          value: tryParseJsonText(item.text),
-        };
-      }
-
-      return { title: `Resource ${index + 1}`, value: item };
-    });
-  }
-
-  if (Array.isArray(payload.messages)) {
-    return payload.messages.map((item, index) => {
-      if (isRecord(item) && isRecord(item.content) && typeof item.content.text === 'string') {
-        return {
-          title: typeof item.role === 'string' ? `${item.role} message` : `Message ${index + 1}`,
-          value: tryParseJsonText(item.content.text),
-        };
-      }
-
-      return { title: `Message ${index + 1}`, value: item };
-    });
-  }
-
-  return [{ title: 'Result', value: payload }];
-}
-
-function renderValue(value: unknown, depth = 0): JSX.Element {
-  if (typeof value === 'string') {
-    return (
-      <div className="whitespace-pre-wrap break-words text-sm leading-6 text-gray-800">
-        {value}
-      </div>
-    );
-  }
-
-  if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
-    return (
-      <div className="text-sm text-gray-800">
-        {String(value)}
-      </div>
-    );
-  }
-
-  if (Array.isArray(value)) {
-    if (value.length === 0) {
-      return <div className="text-sm text-gray-500">No items</div>;
+    // Setup the accumulative consultation context
+    let fullContext = consultationText;
+    if (isBrushUp) {
+      fullContext += `\n\n【追加の顧客回答・情報】：\n${brushUpText}`;
+      setHistory(prev => [...prev, { role: 'user', content: brushUpText }]);
+      setConsultationText(fullContext);
+      setBrushUpText('');
     }
 
-    return (
-      <div className="space-y-3">
-        {value.map((item, index) => (
-          <div
-            key={index}
-            className={isRecord(item) ? 'rounded-lg border border-gray-200 bg-gray-50 p-3' : ''}
+    try {
+      const response = await postJson<{ content: { text: string }[] }>('/api/tool', {
+        name: 'run_full_case_workflow',
+        arguments: {
+          case_id: `case-${Date.now()}`,
+          request_text: fullContext,
+          client_name: clientName || 'お客様',
+          domain_hint: 'auto',
+          include_disclaimer: true,
+        },
+      });
+
+      const parsedInner = JSON.parse(response.content[0].text);
+      const outputs = parsedInner.outputs || {};
+      
+      const newCaseData: CaseData = {
+        issues: outputs.issues?.issues || [],
+        missingFacts: outputs.issues?.missing_facts || [],
+        lawCandidates: outputs.related_laws?.law_candidates || [],
+        checklist: outputs.missing_information?.checklist || [],
+        draftReply: outputs.draft_reply || { subject: 'No subject', body: 'No body generated.' },
+      };
+
+      setCaseData(newCaseData);
+      
+      if (isBrushUp) {
+        setHistory(prev => [...prev, { role: 'assistant', content: '情報を更新しました。' }]);
+      } else {
+        setHistory([{ role: 'user', content: consultationText }]);
+      }
+
+      setStage('dashboard');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStage(isBrushUp && caseData ? 'dashboard' : 'intake');
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#e8eaed] text-[#111111] overflow-hidden selection:bg-black selection:text-white pb-24">
+      <AnimatePresence mode="wait">
+        {stage === 'intake' && (
+          <IntakeView 
+            key="intake"
+            clientName={clientName}
+            setClientName={setClientName}
+            consultationText={consultationText}
+            setConsultationText={setConsultationText}
+            onSubmit={handleStartAnalysis}
+            error={error}
+          />
+        )}
+        
+        {stage === 'analyzing' && <AnalyzingView key="analyzing" />}
+
+        {stage === 'dashboard' && caseData && (
+          <DashboardView 
+            key="dashboard"
+            caseData={caseData}
+            clientName={clientName}
+            onReset={() => {
+              setCaseData(null);
+              setConsultationText('');
+              setClientName('');
+              setHistory([]);
+              setStage('intake');
+            }}
+            brushUpText={brushUpText}
+            setBrushUpText={setBrushUpText}
+            onBrushUp={(e) => handleStartAnalysis(e, true)}
+            error={error}
+          />
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+const PRESETS = [
+  {
+    label: "飲食店(深夜営業)",
+    clientName: "バーテンダー 山田",
+    consultationText: "駅前でダーツバーを開業しようと思っています。\nお酒を提供しつつ、お客様と一緒にゲームを楽しめるスタイルを予定しています。\n朝の5時ごろまで営業したいのですが、何か特別な手続きや許可は必要でしょうか？\n店舗面積は15坪ほどで、カウンター席とボックス席があります。",
+  },
+  {
+    label: "建設業許可(新規)",
+    clientName: "株式会社ビルド・タナカ",
+    consultationText: "現在、個人事業主として大工仕事や内装トラブルの修繕を請け負っています。\n来月から法人成りして、500万円以上のリフォーム工事も受注していきたいと考えています。\n自分は10年以上実務経験がありますが、国家資格は持っていません。\nどのような条件を満たせば許可が取れますか？",
+  },
+  {
+    label: "外国人在留資格",
+    clientName: "IT企業 採用担当",
+    consultationText: "この度、ベトナム国籍のエンジニアを採用することになりました。\n彼は日本の専門学校で「情報処理」を学んで来月卒業予定です。\n弊社では主にウェブアプリケーションの開発やサーバー保守を担当してもらう予定です。\nビザの変更手続きが必要だと思うのですが、どのような書類やフローになりますか？",
+  }
+];
+
+function IntakeView({ clientName, setClientName, consultationText, setConsultationText, onSubmit, error }: any) {
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+      className="max-w-4xl mx-auto pt-[10vh] lg:pt-[15vh] px-6"
+    >
+      <div className="mb-12">
+        <h1 className="text-6xl md:text-8xl tracking-tight mb-4 text-black">Triage.</h1>
+        <p className="text-xl text-stone-500 font-medium">Automatic Intake & Case Structuring</p>
+      </div>
+
+      <form onSubmit={onSubmit} className="space-y-12">
+        <div className="clay-panel p-8 md:p-12 space-y-8">
+          
+          <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+            <span className="text-xs font-bold uppercase tracking-widest text-stone-400 mr-2">Quick Presets:</span>
+            <div className="flex flex-wrap gap-2">
+              {PRESETS.map((preset, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  onClick={() => {
+                    setClientName(preset.clientName);
+                    setConsultationText(preset.consultationText);
+                  }}
+                  className="px-4 py-2 text-xs font-bold bg-[#e8eaed] text-stone-600 rounded-full border border-stone-300 hover:text-black hover:border-black transition-colors"
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-3 pt-4 border-t border-stone-300/50">
+            <label className="block text-sm font-bold uppercase tracking-widest text-stone-400">Client Name</label>
+            <input 
+              type="text" 
+              placeholder="Ex: 鈴木 太郎"
+              value={clientName}
+              onChange={(e) => setClientName(e.target.value)}
+              className="w-full bg-transparent border-b-2 border-stone-300 focus:border-black py-3 text-2xl font-medium outline-none transition-colors placeholder:text-stone-300"
+            />
+          </div>
+
+          <div className="space-y-3">
+            <label className="block text-sm font-bold uppercase tracking-widest text-stone-400">Consultation Details</label>
+            <textarea 
+              placeholder="ご相談内容をこちらにペーストしてください..."
+              value={consultationText}
+              onChange={(e) => setConsultationText(e.target.value)}
+              rows={6}
+              className="w-full clay-inset p-6 text-lg font-medium outline-none resize-y placeholder:text-stone-400"
+            />
+          </div>
+          
+          {error && (
+            <div className="bg-red-100 text-red-700 p-4 rounded-xl flex items-center gap-3 text-sm font-medium">
+              <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+              {error}
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end">
+          <button 
+            type="submit"
+            disabled={!consultationText.trim()}
+            className="clay-btn-primary px-10 py-5 text-lg font-bold flex items-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed uppercase tracking-wider"
           >
-            {isRecord(item) ? (
-              renderValue(item, depth + 1)
-            ) : (
-              <div className="flex gap-2 text-sm text-gray-800">
-                <span className="text-gray-400">{index + 1}.</span>
-                <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">{String(item)}</div>
+            Start Analysis
+            <ChevronRight className="w-6 h-6" />
+          </button>
+        </div>
+      </form>
+    </motion.div>
+  );
+}
+
+function AnalyzingView() {
+  return (
+    <motion.div 
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="min-h-screen flex flex-col items-center justify-center font-bold text-center"
+    >
+      <motion.div 
+        animate={{ rotate: 360 }}
+        transition={{ duration: 3, ease: "linear", repeat: Infinity }}
+        className="w-24 h-24 border-[12px] border-stone-200 border-t-black rounded-full mb-12"
+      />
+      <h2 className="text-4xl md:text-5xl tracking-tight mb-4">Processing Case</h2>
+      <p className="text-stone-500 text-xl font-medium">Extracting issues, retrieving laws, generating replies...</p>
+    </motion.div>
+  );
+}
+
+function DashboardView({ caseData, clientName, onReset, brushUpText, setBrushUpText, onBrushUp, error }: any) {
+  return (
+    <motion.div 
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="max-w-[1400px] mx-auto px-6 py-12"
+    >
+      {/* Header */}
+      <div className="flex justify-between items-center mb-12">
+        <div>
+          <h1 className="text-4xl md:text-5xl tracking-tight font-black mb-2">{clientName || 'お客様'}の事案</h1>
+          <p className="text-stone-500 font-medium">Intake Dashboard</p>
+        </div>
+        <button 
+          onClick={onReset} 
+          className="clay-btn p-4 rounded-full text-stone-500 hover:text-black"
+          title="New Case"
+        >
+          <RefreshCw className="w-6 h-6" />
+        </button>
+      </div>
+
+      {/* Swiss Grid Layout */}
+      <div className="swiss-grid">
+        
+        {/* Left Column: Triage & Data */}
+        <div className="col-span-12 lg:col-span-4 space-y-8">
+          
+          <div className="clay-card p-8">
+            <h3 className="flex items-center gap-3 text-lg font-bold uppercase tracking-widest text-stone-400 mb-6">
+              <FileText className="w-5 h-5" />
+              Identified Issues
+            </h3>
+            <div className="space-y-4">
+              {caseData.issues?.map((issue: Issue, i: number) => (
+                <div key={i} className="border-l-4 border-black pl-5 py-1">
+                  <h4 className="font-bold text-lg">{issue.label}</h4>
+                  {issue.reason && <p className="text-stone-500 text-sm mt-1 leading-relaxed">{issue.reason}</p>}
+                </div>
+              ))}
+              {caseData.issues?.length === 0 && <p className="text-stone-400 font-medium">No clear issues identified.</p>}
+            </div>
+          </div>
+
+          <div className="clay-card p-8">
+            <h3 className="flex items-center gap-3 text-lg font-bold uppercase tracking-widest text-stone-400 mb-6">
+              <Scale className="w-5 h-5" />
+              Relevant Laws
+            </h3>
+            <div className="space-y-4">
+              {caseData.lawCandidates?.map((law: LawCandidate, i: number) => (
+                <div key={i} className="clay-inset p-4">
+                  <h4 className="font-bold text-md mb-1">{law.law_title}</h4>
+                  <p className="text-stone-500 text-xs font-semibold">{law.why_relevant}</p>
+                </div>
+              ))}
+              {caseData.lawCandidates?.length === 0 && <p className="text-stone-400 font-medium">No specific laws triggered.</p>}
+            </div>
+          </div>
+
+        </div>
+
+        {/* Right Column: Output & Actionable */}
+        <div className="col-span-12 lg:col-span-8 flex flex-col gap-8">
+          
+          {/* Main Actionable Box: Draft Reply */}
+          <div className="clay-card p-8 md:p-12 flex-grow bg-white">
+            <div className="flex justify-between items-start mb-8">
+              <h3 className="flex items-center gap-3 text-lg font-bold uppercase tracking-widest text-stone-400">
+                <MessageSquare className="w-5 h-5" />
+                Draft Initial Reply
+              </h3>
+            </div>
+            
+            <div className="clay-inset bg-[#fcfcfc] p-6 md:p-8 rounded-2xl relative overflow-hidden group">
+              <div className="absolute top-0 left-0 w-2 h-full bg-black"></div>
+              {caseData.draftReply.subject && (
+                <h4 className="text-2xl font-bold mb-6 pb-6 border-b border-stone-200">
+                  {caseData.draftReply.subject}
+                </h4>
+              )}
+              <div className="whitespace-pre-wrap font-medium leading-relaxed text-lg text-stone-800">
+                {caseData.draftReply.body}
+              </div>
+            </div>
+
+            {/* Caveats */}
+            {caseData.draftReply.review_notes && caseData.draftReply.review_notes.length > 0 && (
+              <div className="mt-8 pt-8 border-t border-stone-200">
+                <h4 className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-3">Review Notes</h4>
+                <ul className="flex flex-wrap gap-2">
+                  {caseData.draftReply.review_notes.map((note: string, i: number) => (
+                    <li key={i} className="bg-red-100 text-red-800 px-3 py-1 rounded-full text-xs font-bold">
+                      {note}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
           </div>
-        ))}
-      </div>
-    );
-  }
 
-  if (isRecord(value)) {
-    const entries = Object.entries(value);
-
-    if (entries.length === 0) {
-      return <div className="text-sm text-gray-500">Empty object</div>;
-    }
-
-    return (
-      <div className="space-y-4">
-        {entries.map(([key, entryValue]) => (
-          <div key={key} className={depth > 0 ? 'rounded-lg border border-gray-200 bg-white p-3' : ''}>
-            <div className="mb-1 text-xs font-semibold uppercase tracking-[0.12em] text-gray-500">
-              {formatLabel(key)}
-            </div>
-            {renderValue(entryValue, depth + 1)}
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  return (
-    <pre className="overflow-auto rounded-lg bg-gray-950 p-4 text-xs text-green-300">
-      {formatJson(value)}
-    </pre>
-  );
-}
-
-function buildSampleValue(schema: unknown, keyName = ''): unknown {
-  if (!schema || typeof schema !== 'object') {
-    return keyName ? `sample_${keyName}` : 'sample_value';
-  }
-
-  const typedSchema = schema as {
-    type?: string;
-    default?: unknown;
-    enum?: unknown[];
-    items?: unknown;
-    properties?: Record<string, unknown>;
-  };
-
-  if (typedSchema.default !== undefined) {
-    return typedSchema.default;
-  }
-
-  if (Array.isArray(typedSchema.enum) && typedSchema.enum.length > 0) {
-    return typedSchema.enum[0];
-  }
-
-  if (typedSchema.type === 'string') {
-    if (keyName === 'case_id') {
-      return '123';
-    }
-    if (keyName.includes('date')) {
-      return '2026-04-05';
-    }
-    if (keyName.includes('uri')) {
-      return 'sample://value';
-    }
-    return keyName ? `sample_${keyName}` : 'sample_text';
-  }
-
-  if (typedSchema.type === 'number' || typedSchema.type === 'integer') {
-    return 1;
-  }
-
-  if (typedSchema.type === 'boolean') {
-    return true;
-  }
-
-  if (typedSchema.type === 'array') {
-    return [buildSampleValue(typedSchema.items, keyName ? `${keyName}_item` : 'item')];
-  }
-
-  if (typedSchema.type === 'object') {
-    return buildSampleObjectFromSchema(typedSchema.properties);
-  }
-
-  return keyName ? `sample_${keyName}` : 'sample_value';
-}
-
-function buildSampleObjectFromSchema(properties?: Record<string, unknown>): Record<string, unknown> {
-  if (!properties) {
-    return {};
-  }
-
-  return Object.fromEntries(
-    Object.entries(properties).map(([key, schema]) => [key, buildSampleValue(schema, key)]),
-  );
-}
-
-function buildPromptArgumentsFromDefinition(prompt: PromptSummary): Record<string, unknown> {
-  if (prompt.defaultArguments && Object.keys(prompt.defaultArguments).length > 0) {
-    return prompt.defaultArguments;
-  }
-
-  const sharedDefaults = getSharedDefaultPromptArguments(prompt.name);
-
-  if (Object.keys(sharedDefaults).length > 0) {
-    return sharedDefaults;
-  }
-
-  if (!prompt.arguments || prompt.arguments.length === 0) {
-    return {};
-  }
-
-  return Object.fromEntries(
-    prompt.arguments.map((argument) => [argument.name, `sample_${argument.name}`]),
-  );
-}
-
-function getToolSamples(tool: ToolSummary): WorkshopInputSample[] {
-  if (tool.samples && tool.samples.length > 0) {
-    return tool.samples;
-  }
-
-  const sharedSamples = getToolInputSamples(tool.name);
-
-  if (sharedSamples.length > 0) {
-    return sharedSamples;
-  }
-
-  return [
-    {
-      id: `${tool.name}-fallback`,
-      label: '基本サンプル',
-      summary: '入力スキーマから組み立てた簡易サンプルだぜ。',
-      arguments: buildSampleObjectFromSchema(tool.inputSchema?.properties),
-    },
-  ];
-}
-
-function getPromptSamples(prompt: PromptSummary): WorkshopInputSample[] {
-  if (prompt.samples && prompt.samples.length > 0) {
-    return prompt.samples;
-  }
-
-  const sharedSamples = getPromptInputSamples(prompt.name);
-
-  if (sharedSamples.length > 0) {
-    return sharedSamples;
-  }
-
-  return [
-    {
-      id: `${prompt.name}-fallback`,
-      label: '基本サンプル',
-      summary: 'prompt 引数の簡易サンプルだぜ。',
-      arguments: buildPromptArgumentsFromDefinition(prompt),
-    },
-  ];
-}
-
-function getToolInitialArguments(tool: ToolSummary): Record<string, unknown> {
-  const toolSamples = getToolSamples(tool);
-
-  if (toolSamples.length > 0) {
-    return toolSamples[0].arguments;
-  }
-
-  if (tool.defaultArguments && Object.keys(tool.defaultArguments).length > 0) {
-    return tool.defaultArguments;
-  }
-
-  const sharedDefaults = getSharedDefaultToolArguments(tool.name);
-
-  if (Object.keys(sharedDefaults).length > 0) {
-    return sharedDefaults;
-  }
-
-  return buildSampleObjectFromSchema(tool.inputSchema?.properties);
-}
-
-function getPromptInitialArguments(prompt: PromptSummary): Record<string, unknown> {
-  const promptSamples = getPromptSamples(prompt);
-
-  if (promptSamples.length > 0) {
-    return promptSamples[0].arguments;
-  }
-
-  return buildPromptArgumentsFromDefinition(prompt);
-}
-
-export default function App() {
-  const [connected, setConnected] = useState(false);
-  const [connectionStage, setConnectionStage] = useState<'idle' | 'loading' | 'connected'>('idle');
-  const [tools, setTools] = useState<ToolSummary[]>([]);
-  const [resources, setResources] = useState<ResourceSummary[]>([]);
-  const [prompts, setPrompts] = useState<PromptSummary[]>([]);
-  const [output, setOutput] = useState<OutputState>({
-    status: 'idle',
-    label: '',
-    payload: null,
-  });
-  const [connectionError, setConnectionError] = useState<string>('');
-  const [selectedToolName, setSelectedToolName] = useState<string>('');
-  const [toolArgumentsText, setToolArgumentsText] = useState<string>('{}');
-  const [toolArgumentsError, setToolArgumentsError] = useState<string>('');
-  const [selectedToolSampleId, setSelectedToolSampleId] = useState<string>('');
-  const [selectedPromptName, setSelectedPromptName] = useState<string>('');
-  const [promptArgumentsText, setPromptArgumentsText] = useState<string>('{}');
-  const [promptArgumentsError, setPromptArgumentsError] = useState<string>('');
-  const [selectedPromptSampleId, setSelectedPromptSampleId] = useState<string>('');
-  const loadAttempted = useRef(false);
-
-  useEffect(() => {
-    if (loadAttempted.current) {
-      return;
-    }
-    loadAttempted.current = true;
-
-    let active = true;
-
-    const loadCatalog = async () => {
-      try {
-        setConnectionStage('loading');
-
-        const response = await fetch('/api/catalog');
-        const payload = (await response.json()) as CatalogResponse & { error?: string };
-
-        if (!response.ok) {
-          throw new Error(payload.error || `Catalog request failed (${response.status})`);
-        }
-
-        if (!active) {
-          return;
-        }
-
-        setConnected(true);
-        setConnectionStage('connected');
-        setConnectionError('');
-        setTools(payload.tools);
-        setResources(payload.resources);
-        setPrompts(payload.prompts);
-        if (payload.tools.length > 0) {
-          const initialToolSamples = getToolSamples(payload.tools[0]);
-          setSelectedToolName(payload.tools[0].name);
-          setToolArgumentsText(formatJson(getToolInitialArguments(payload.tools[0])));
-          setToolArgumentsError('');
-          setSelectedToolSampleId(initialToolSamples[0]?.id ?? '');
-        }
-        if (payload.prompts.length > 0) {
-          const initialPromptSamples = getPromptSamples(payload.prompts[0]);
-          setSelectedPromptName(payload.prompts[0].name);
-          setPromptArgumentsText(formatJson(getPromptInitialArguments(payload.prompts[0])));
-          setPromptArgumentsError('');
-          setSelectedPromptSampleId(initialPromptSamples[0]?.id ?? '');
-        }
-      } catch (error) {
-        if (!active) {
-          return;
-        }
-
-        setConnected(false);
-        setConnectionStage('idle');
-        setConnectionError(error instanceof Error ? error.message : String(error));
-      }
-    };
-
-    void loadCatalog();
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const handleSelectTool = (tool: ToolSummary) => {
-    const toolSamples = getToolSamples(tool);
-    setSelectedToolName(tool.name);
-    setToolArgumentsText(formatJson(getToolInitialArguments(tool)));
-    setToolArgumentsError('');
-    setSelectedToolSampleId(toolSamples[0]?.id ?? '');
-  };
-
-  const handleSelectPrompt = (prompt: PromptSummary) => {
-    const promptSamples = getPromptSamples(prompt);
-    setSelectedPromptName(prompt.name);
-    setPromptArgumentsText(formatJson(getPromptInitialArguments(prompt)));
-    setPromptArgumentsError('');
-    setSelectedPromptSampleId(promptSamples[0]?.id ?? '');
-  };
-
-  const handleApplyToolSample = (tool: ToolSummary, sample: WorkshopInputSample) => {
-    setSelectedToolName(tool.name);
-    setSelectedToolSampleId(sample.id);
-    setToolArgumentsText(formatJson(sample.arguments));
-    setToolArgumentsError('');
-  };
-
-  const handleApplyPromptSample = (prompt: PromptSummary, sample: WorkshopInputSample) => {
-    setSelectedPromptName(prompt.name);
-    setSelectedPromptSampleId(sample.id);
-    setPromptArgumentsText(formatJson(sample.arguments));
-    setPromptArgumentsError('');
-  };
-
-  const handleCallTool = async () => {
-    if (!selectedToolName) {
-      setOutput({
-        status: 'error',
-        label: 'Tool execution failed',
-        payload: 'Select a tool first.',
-      });
-      return;
-    }
-
-    let parsedArguments: Record<string, unknown>;
-
-    try {
-      const parsed = JSON.parse(toolArgumentsText) as unknown;
-
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
-        throw new Error('Tool input must be a JSON object.');
-      }
-
-      parsedArguments = parsed as Record<string, unknown>;
-      setToolArgumentsError('');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setToolArgumentsError(message);
-      setOutput({
-        status: 'error',
-        label: 'Tool input error',
-        payload: `Invalid tool input JSON. ${message}`,
-      });
-      return;
-    }
-
-    try {
-      setOutput({
-        status: 'loading',
-        label: selectedToolName,
-        payload: 'Calling tool...',
-      });
-      const result = await postJson('/api/tool', {
-        name: selectedToolName,
-        arguments: parsedArguments,
-      });
-      setOutput({
-        status: 'ready',
-        label: selectedToolName,
-        payload: result,
-      });
-    } catch (error) {
-      setOutput({
-        status: 'error',
-        label: selectedToolName,
-        payload: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
-
-  const handleReadResource = async (uri: string) => {
-    try {
-      setOutput({
-        status: 'loading',
-        label: uri,
-        payload: 'Reading resource...',
-      });
-      const result = await postJson('/api/resource', { uri });
-      setOutput({
-        status: 'ready',
-        label: uri,
-        payload: result,
-      });
-    } catch (error) {
-      setOutput({
-        status: 'error',
-        label: uri,
-        payload: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
-
-  const handleGetPrompt = async (name: string) => {
-    let parsedArguments: Record<string, unknown>;
-
-    try {
-      const parsed = JSON.parse(promptArgumentsText) as unknown;
-
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
-        throw new Error('Prompt input must be a JSON object.');
-      }
-
-      parsedArguments = parsed as Record<string, unknown>;
-      setPromptArgumentsError('');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setPromptArgumentsError(message);
-      setOutput({
-        status: 'error',
-        label: 'Prompt input error',
-        payload: `Invalid prompt input JSON. ${message}`,
-      });
-      return;
-    }
-
-    try {
-      setOutput({
-        status: 'loading',
-        label: name,
-        payload: 'Getting prompt...',
-      });
-      const result = await postJson('/api/prompt', { name, arguments: parsedArguments });
-      setOutput({
-        status: 'ready',
-        label: name,
-        payload: result,
-      });
-    } catch (error) {
-      setOutput({
-        status: 'error',
-        label: name,
-        payload: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-gray-50 p-8 font-sans">
-      <div className="max-w-5xl mx-auto space-y-8">
-        <header className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-          <h1 className="text-2xl font-semibold text-gray-900">Legal Intake & e-Gov Practice MCP Server</h1>
-          <p className="text-gray-500 mt-2">
-            Status: {connected ? <span className="text-green-600 font-medium">Connected</span> : <span className="text-amber-600 font-medium">Loading...</span>}
-            {' '}
-            {connectionStage === 'loading' && <span className="text-blue-600 font-medium">Fetching workshop catalog...</span>}
-          </p>
-          {connectionError && (
-            <p className="mt-2 text-sm text-red-600">
-              Connection error: {connectionError}
-            </p>
-          )}
-        </header>
-
-        <div className="grid grid-cols-1 xl:grid-cols-[minmax(320px,0.9fr)_minmax(0,1.1fr)] gap-8 items-start">
-          <div className="space-y-6">
-            <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-              <h2 className="text-lg font-medium text-gray-900 mb-4">Tools</h2>
-              <div className="space-y-2">
-                {tools.map((tool) => (
-                  <button
-                    key={tool.name}
-                    onClick={() => handleSelectTool(tool)}
-                    className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
-                      selectedToolName === tool.name
-                        ? 'border-blue-500 bg-blue-50 text-blue-900'
-                        : 'border-gray-200 hover:border-blue-500 hover:bg-blue-50 text-gray-700'
-                    }`}
-                  >
-                    <div className="text-sm font-medium">
-                      {getToolDisplayMeta(tool).title}
-                    </div>
-                    <div className="mt-1 text-xs text-gray-500">
-                      {getToolDisplayMeta(tool).description}
-                    </div>
-                  </button>
-                ))}
-                {tools.length === 0 && <p className="text-sm text-gray-500">No tools available</p>}
-              </div>
-              {selectedToolName && (
-                <div className="mt-4 space-y-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium text-gray-900">Tool Input</p>
-                      <p className="text-xs text-gray-500">現場でよくある相談をサンプル化してある。近いものを選んでから調整しろよな。</p>
-                    </div>
-                    <button
-                      onClick={handleCallTool}
-                      className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700"
-                    >
-                      Run Tool
-                    </button>
+          {/* Missing Information Checklist */}
+          <div className="clay-card p-8">
+            <h3 className="flex items-center gap-3 text-lg font-bold uppercase tracking-widest text-stone-400 mb-6">
+              <CheckSquare className="w-5 h-5" />
+              Information Checklist
+            </h3>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {caseData.checklist?.map((item: ChecklistItem, i: number) => (
+                <div key={i} className="clay-inset p-5 flex items-start gap-4">
+                  <div className="mt-1 flex-shrink-0 w-6 h-6 rounded border-2 border-black opacity-30"></div>
+                  <div>
+                    <h4 className="font-bold text-md mb-1">{item.item || item.question_to_client || '確認事項'}</h4>
+                    {item.why_needed && (
+                      <p className="text-stone-500 text-xs font-semibold">{item.why_needed}</p>
+                    )}
                   </div>
-                  {(() => {
-                    const selectedTool = tools.find((tool) => tool.name === selectedToolName);
-
-                    if (!selectedTool) {
-                      return null;
-                    }
-
-                    const samples = getToolSamples(selectedTool);
-                    const activeSample = samples.find((sample) => sample.id === selectedToolSampleId) ?? samples[0];
-
-                    return (
-                      <div className="space-y-2">
-                        <div className="flex flex-wrap gap-2">
-                          {samples.map((sample) => (
-                            <button
-                              key={sample.id}
-                              onClick={() => handleApplyToolSample(selectedTool, sample)}
-                              className={`px-3 py-1.5 rounded-full text-xs border transition-colors ${
-                                selectedToolSampleId === sample.id
-                                  ? 'border-blue-600 bg-blue-100 text-blue-900'
-                                  : 'border-gray-200 bg-white text-gray-700 hover:border-blue-400 hover:text-blue-900'
-                              }`}
-                            >
-                              {sample.label}
-                            </button>
-                          ))}
-                        </div>
-                        {activeSample && (
-                          <p className="text-xs text-gray-500">
-                            {activeSample.summary}
-                          </p>
-                        )}
-                      </div>
-                    );
-                  })()}
-                  <textarea
-                    value={toolArgumentsText}
-                    onChange={(event) => {
-                      setToolArgumentsText(event.target.value);
-                      if (toolArgumentsError) {
-                        setToolArgumentsError('');
-                      }
-                    }}
-                    spellCheck={false}
-                    className="w-full h-56 rounded-lg border border-gray-200 bg-gray-950 text-green-300 font-mono text-xs p-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  {toolArgumentsError && (
-                    <p className="text-xs text-red-600">
-                      JSON error: {toolArgumentsError}
-                    </p>
-                  )}
                 </div>
-              )}
-            </section>
-
-            <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-              <h2 className="text-lg font-medium text-gray-900 mb-4">Resources</h2>
-              <div className="space-y-2">
-                {resources.map((resource) => (
-                  <button
-                    key={resource.uri}
-                    onClick={() => handleReadResource(resource.uri)}
-                    className="w-full text-left px-4 py-3 rounded-lg border border-gray-200 hover:border-green-500 hover:bg-green-50 transition-colors text-gray-700"
-                  >
-                    <div className="text-sm font-medium">
-                      {getResourceDisplayMeta(resource).title}
-                    </div>
-                    <div className="mt-1 text-xs text-gray-500">
-                      {getResourceDisplayMeta(resource).description}
-                    </div>
-                  </button>
-                ))}
-                {resources.length === 0 && <p className="text-sm text-gray-500">No resources available</p>}
-              </div>
-            </section>
-
-            <section className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-              <h2 className="text-lg font-medium text-gray-900 mb-4">Prompts</h2>
-              <div className="space-y-2">
-                {prompts.map((prompt) => (
-                  <button
-                    key={prompt.name}
-                    onClick={() => handleSelectPrompt(prompt)}
-                    className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
-                      selectedPromptName === prompt.name
-                        ? 'border-purple-500 bg-purple-50 text-purple-900'
-                        : 'border-gray-200 hover:border-purple-500 hover:bg-purple-50 text-gray-700'
-                    }`}
-                  >
-                    <div className="text-sm font-medium">
-                      {getPromptDisplayMeta(prompt).title}
-                    </div>
-                    <div className="mt-1 text-xs text-gray-500">
-                      {getPromptDisplayMeta(prompt).description}
-                    </div>
-                  </button>
-                ))}
-                {prompts.length === 0 && <p className="text-sm text-gray-500">No prompts available</p>}
-              </div>
-              {selectedPromptName && (
-                <div className="mt-4 space-y-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium text-gray-900">Prompt Input</p>
-                      <p className="text-xs text-gray-500">用途に近い相談文を選んで、そこから直すと早ぇぜ。</p>
-                    </div>
-                    <button
-                      onClick={() => handleGetPrompt(selectedPromptName)}
-                      className="px-4 py-2 rounded-lg bg-purple-600 text-white text-sm font-medium hover:bg-purple-700"
-                    >
-                      Run Prompt
-                    </button>
-                  </div>
-                  {(() => {
-                    const selectedPrompt = prompts.find((prompt) => prompt.name === selectedPromptName);
-
-                    if (!selectedPrompt) {
-                      return null;
-                    }
-
-                    const samples = getPromptSamples(selectedPrompt);
-                    const activeSample = samples.find((sample) => sample.id === selectedPromptSampleId) ?? samples[0];
-
-                    return (
-                      <div className="space-y-2">
-                        <div className="flex flex-wrap gap-2">
-                          {samples.map((sample) => (
-                            <button
-                              key={sample.id}
-                              onClick={() => handleApplyPromptSample(selectedPrompt, sample)}
-                              className={`px-3 py-1.5 rounded-full text-xs border transition-colors ${
-                                selectedPromptSampleId === sample.id
-                                  ? 'border-purple-600 bg-purple-100 text-purple-900'
-                                  : 'border-gray-200 bg-white text-gray-700 hover:border-purple-400 hover:text-purple-900'
-                              }`}
-                            >
-                              {sample.label}
-                            </button>
-                          ))}
-                        </div>
-                        {activeSample && (
-                          <p className="text-xs text-gray-500">
-                            {activeSample.summary}
-                          </p>
-                        )}
-                      </div>
-                    );
-                  })()}
-                  <textarea
-                    value={promptArgumentsText}
-                    onChange={(event) => {
-                      setPromptArgumentsText(event.target.value);
-                      if (promptArgumentsError) {
-                        setPromptArgumentsError('');
-                      }
-                    }}
-                    spellCheck={false}
-                    className="w-full h-40 rounded-lg border border-gray-200 bg-gray-950 text-green-300 font-mono text-xs p-4 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  />
-                  {promptArgumentsError && (
-                    <p className="text-xs text-red-600">
-                      JSON error: {promptArgumentsError}
-                    </p>
-                  )}
-                </div>
-              )}
-            </section>
+              ))}
+              {caseData.checklist?.length === 0 && <p className="text-stone-400 font-medium">No missing information detected.</p>}
+            </div>
           </div>
-
-          <section className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden xl:sticky xl:top-8">
-            <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center">
-              <div>
-                <h2 className="text-lg font-medium text-gray-900">Output</h2>
-                <p className="text-xs text-gray-500 mt-1">
-                  {output.label || '選択した tool / resource / prompt の結果をここに整形表示するぜ。'}
-                </p>
-              </div>
-              <button
-                onClick={() => setOutput({ status: 'idle', label: '', payload: null })}
-                className="text-xs text-gray-500 hover:text-gray-900"
-              >
-                Clear
-              </button>
-            </div>
-            <div className="p-6 space-y-4 max-h-[calc(100vh-12rem)] overflow-auto">
-              {output.status === 'idle' && (
-                <p className="text-sm text-gray-500">
-                  左の項目を実行すると、`text` の中身を読みやすく整えてここに出すんな。
-                </p>
-              )}
-
-              {output.status === 'loading' && (
-                <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-900">
-                  {typeof output.payload === 'string' ? output.payload : 'Loading...'}
-                </div>
-              )}
-
-              {output.status === 'error' && (
-                <div className="rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-800 whitespace-pre-wrap">
-                  {typeof output.payload === 'string' ? output.payload : formatJson(output.payload)}
-                </div>
-              )}
-
-              {output.status === 'ready' && (
-                <div className="space-y-4">
-                  {toDisplayBlocks(output.payload).map((block, index) => (
-                    <section key={`${block.title}-${index}`} className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                      <h3 className="text-sm font-semibold text-gray-900 mb-3">
-                        {block.title}
-                      </h3>
-                      {renderValue(block.value)}
-                    </section>
-                  ))}
-
-                  <details className="rounded-xl border border-gray-200 bg-white">
-                    <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-gray-700">
-                      Raw JSON
-                    </summary>
-                    <div className="border-t border-gray-200 p-4">
-                      <pre className="overflow-auto rounded-lg bg-gray-950 p-4 text-xs text-green-300 whitespace-pre-wrap break-words">
-                        {formatJson(output.payload)}
-                      </pre>
-                    </div>
-                  </details>
-                </div>
-              )}
-            </div>
-          </section>
+          
         </div>
       </div>
-    </div>
+
+      {/* Floating Brush Up / Interactivity Bar */}
+      <div className="fixed bottom-0 left-0 w-full p-6 z-50">
+        <div className="max-w-[1400px] mx-auto flex items-end justify-center md:justify-end">
+          <form 
+            onSubmit={onBrushUp}
+            className="w-full md:w-1/2 clay-card p-3 flex gap-3 backdrop-blur-md bg-[#e8eaed]/90"
+          >
+            <input 
+              type="text"
+              placeholder="顧客の追加質問や事実を入力してブラッシュアップ..."
+              value={brushUpText}
+              onChange={(e) => setBrushUpText(e.target.value)}
+              className="flex-grow bg-transparent px-4 py-3 text-md font-medium outline-none placeholder:text-stone-400"
+            />
+            <button 
+              type="submit"
+              disabled={!brushUpText.trim()}
+              className="clay-btn-primary p-4 rounded-2xl flex-shrink-0 disabled:opacity-50"
+            >
+              <Send className="w-5 h-5" />
+            </button>
+          </form>
+        </div>
+        {error && (
+          <div className="max-w-[1400px] mx-auto mt-2">
+            <div className="bg-red-100 text-red-700 p-3 rounded-lg text-sm font-bold text-center">
+              Error applying brush up: {error}
+            </div>
+          </div>
+        )}
+      </div>
+
+    </motion.div>
   );
 }

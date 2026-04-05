@@ -1,1 +1,75 @@
 @import "tailwindcss";
+
+@layer utilities {
+  .clay-card {
+    background: #e8eaed;
+    border-radius: 24px;
+    box-shadow:  10px 10px 20px #c5c7ca, -10px -10px 20px #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+  }
+
+  .clay-panel {
+    background: #e8eaed;
+    border-radius: 32px;
+    box-shadow:  14px 14px 28px #c5c7ca, -14px -14px 28px #ffffff;
+  }
+
+  .clay-inset {
+    background: #e8eaed;
+    border-radius: 16px;
+    box-shadow: inset 6px 6px 12px #c5c7ca, inset -6px -6px 12px #ffffff;
+  }
+
+  .clay-btn {
+    background: #e8eaed;
+    border-radius: 9999px;
+    box-shadow:  6px 6px 12px #c5c7ca, -6px -6px 12px #ffffff;
+    transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  }
+  
+  .clay-btn:hover {
+    box-shadow:  8px 8px 16px #c5c7ca, -8px -8px 16px #ffffff;
+    transform: translateY(-1px);
+  }
+
+  .clay-btn:active {
+    box-shadow: inset 4px 4px 8px #c5c7ca, inset -4px -4px 8px #ffffff;
+    transform: translateY(1px);
+  }
+
+  .clay-btn-primary {
+    background: #000000;
+    color: #ffffff;
+    border-radius: 9999px;
+    box-shadow:  6px 6px 12px #c5c7ca, -6px -6px 12px #ffffff;
+    transition: all 0.2s ease;
+  }
+
+  .clay-btn-primary:active {
+    transform: translateY(2px);
+    box-shadow:  2px 2px 5px #c5c7ca, -2px -2px 5px #ffffff;
+  }
+
+  .swiss-grid {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    grid-column-gap: 2rem;
+    grid-row-gap: 2rem;
+  }
+}
+
+@layer base {
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+  
+  body {
+    background-color: #e8eaed;
+    font-family: 'Inter', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    color: #111111;
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    letter-spacing: -0.04em;
+    font-weight: 800;
+  }
+}
