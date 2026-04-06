@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ChevronRight, FileText, Scale, CheckSquare, MessageSquare, Plus, RefreshCw, Send, AlertTriangle } from 'lucide-react';
+import { ChevronRight, FileText, Scale, CheckSquare, MessageSquare, RefreshCw, Send, AlertTriangle, Copy, Check } from 'lucide-react';
 
 // --- API Utils ---
 async function postJson<T>(url: string, body: unknown): Promise<T> {
@@ -19,6 +19,23 @@ function openExternalUrl(url: string) {
   if (!newWindow) {
     window.location.href = url;
   }
+}
+
+async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textArea = document.createElement('textarea');
+  textArea.value = text;
+  textArea.setAttribute('readonly', 'true');
+  textArea.style.position = 'absolute';
+  textArea.style.left = '-9999px';
+  document.body.appendChild(textArea);
+  textArea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textArea);
 }
 
 // --- Types ---
@@ -51,6 +68,12 @@ type CaseData = {
   draftReply: DraftReply;
   missingFacts: string[];
 };
+
+const CHECKLIST_ANSWER_OPTIONS = ['はい', 'いいえ', '確認中'] as const;
+
+function getChecklistLabel(item: ChecklistItem) {
+  return item.question_to_client || item.item || '確認事項';
+}
 
 export default function App() {
   const [stage, setStage] = useState<'intake' | 'analyzing' | 'dashboard'>('intake');
@@ -278,13 +301,30 @@ function AnalyzingView() {
 
 function DashboardView({ caseData, clientName, onReset, brushUpText, setBrushUpText, onBrushUp, error }: any) {
   const [checklistAnswers, setChecklistAnswers] = React.useState<Record<number, string>>({});
+  const [isBrushUpInputFocused, setIsBrushUpInputFocused] = React.useState(false);
+  const [draftCopied, setDraftCopied] = React.useState(false);
+  const selectedChecklistEntries = caseData.checklist
+    .map((item: ChecklistItem, index: number) => ({ index, item, answer: checklistAnswers[index] || '' }))
+    .filter((entry) => Boolean(entry.answer));
+
+  const handleDraftCopy = async () => {
+    if (!caseData.draftReply?.body) return;
+
+    try {
+      await copyTextToClipboard(caseData.draftReply.body);
+      setDraftCopied(true);
+      window.setTimeout(() => setDraftCopied(false), 1600);
+    } catch (copyError) {
+      console.error('Failed to copy draft reply body', copyError);
+    }
+  };
 
   const handleBrushUpSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     let extraText = "";
     Object.entries(checklistAnswers).forEach(([i, val]) => {
       const item = caseData.checklist[parseInt(i)];
-      const q = item.question_to_client || item.item || '確認事項';
+      const q = getChecklistLabel(item);
       extraText += `- ${q} : ${val}\n`;
     });
     
@@ -405,9 +445,18 @@ function DashboardView({ caseData, clientName, onReset, brushUpText, setBrushUpT
                 <MessageSquare className="w-5 h-5" />
                 Draft Initial Reply
               </h3>
+              <button
+                type="button"
+                onClick={handleDraftCopy}
+                className="rounded-full border border-stone-300 p-3 text-stone-500 transition-colors hover:border-black hover:text-black"
+                aria-label="Draft Initial Reply の本文をコピー"
+                title={draftCopied ? 'Copied' : 'Copy body'}
+              >
+                {draftCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+              </button>
             </div>
             
-            <div className="clay-inset bg-[#fcfcfc] p-6 md:p-8 rounded-2xl relative overflow-hidden group">
+            <div className="clay-inset relative w-full overflow-hidden rounded-2xl bg-[#fcfcfc] p-6 text-left md:p-8">
               <div className="absolute top-0 left-0 w-2 h-full bg-black"></div>
               {caseData.draftReply.subject && (
                 <h4 className="text-2xl font-bold mb-6 pb-6 border-b border-stone-200">
@@ -445,26 +494,15 @@ function DashboardView({ caseData, clientName, onReset, brushUpText, setBrushUpT
               {caseData.checklist?.map((item: ChecklistItem, i: number) => (
                 <div key={i} className="clay-inset p-5 flex flex-col gap-4">
                   <div>
-                    <h4 className="font-bold text-md mb-1">{item.item || item.question_to_client || '確認事項'}</h4>
+                    <h4 className="font-bold text-md mb-1">{getChecklistLabel(item)}</h4>
                     {item.why_needed && (
                       <p className="text-stone-500 text-xs font-semibold">{item.why_needed}</p>
                     )}
                   </div>
-                  <div className="flex flex-wrap gap-2 mt-auto pt-2 border-t border-stone-200/50">
-                    {['はい', 'いいえ', '検討中'].map(ans => (
-                      <button
-                        key={ans}
-                        type="button"
-                        onClick={() => setChecklistAnswers(prev => ({...prev, [i]: prev[i] === ans ? '' : ans}))}
-                        className={`px-3 py-1.5 text-xs font-bold rounded-full transition-colors border ${
-                          checklistAnswers[i] === ans 
-                            ? 'bg-black text-white border-black' 
-                            : 'bg-white text-stone-600 border-stone-200 hover:border-black'
-                        }`}
-                      >
-                        {ans}
-                      </button>
-                    ))}
+                  <div className="mt-auto pt-2 border-t border-stone-200/50">
+                    <p className="text-xs font-bold uppercase tracking-widest text-stone-400">
+                      下のチャット欄で選択して回答
+                    </p>
                   </div>
                 </div>
               ))}
@@ -480,22 +518,91 @@ function DashboardView({ caseData, clientName, onReset, brushUpText, setBrushUpT
         <div className="max-w-[1400px] mx-auto flex items-end justify-center md:justify-end">
           <form 
             onSubmit={handleBrushUpSubmit}
-            className="w-full md:w-1/2 clay-card p-3 flex gap-3 backdrop-blur-md bg-[#e8eaed]/90"
+            className="w-full md:w-[42rem] clay-card p-3 backdrop-blur-md bg-[#e8eaed]/90"
           >
-            <input 
-              type="text"
-              placeholder="顧客の追加質問を入力するか、不足情報を選択して送信..."
-              value={brushUpText}
-              onChange={(e) => setBrushUpText(e.target.value)}
-              className="flex-grow bg-transparent px-4 py-3 text-md font-medium outline-none placeholder:text-stone-400"
-            />
-            <button 
-              type="submit"
-              disabled={!brushUpText.trim() && Object.values(checklistAnswers).filter(Boolean).length === 0}
-              className="clay-btn-primary p-4 rounded-2xl flex-shrink-0 disabled:opacity-50"
-            >
-              <Send className="w-5 h-5" />
-            </button>
+            {caseData.checklist?.length > 0 && isBrushUpInputFocused && (
+              <div className="mb-3 rounded-[1.75rem] border border-stone-300/70 bg-white/70 p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-widest text-stone-400">Quick Answers</p>
+                    <p className="text-sm font-medium text-stone-600">不足情報はここで選ぶだけで送れるぜ。</p>
+                  </div>
+                  {selectedChecklistEntries.length > 0 && (
+                    <button
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => setChecklistAnswers({})}
+                      className="text-xs font-bold text-stone-500 underline underline-offset-2"
+                    >
+                      選択をクリア
+                    </button>
+                  )}
+                </div>
+
+                <div className="max-h-52 space-y-3 overflow-y-auto pr-1">
+                  {caseData.checklist.map((item: ChecklistItem, i: number) => (
+                    <div key={i} className="rounded-2xl bg-[#f6f6f4] px-3 py-3">
+                      <p className="text-sm font-bold leading-snug text-stone-800">{getChecklistLabel(item)}</p>
+                      {item.why_needed && (
+                        <p className="mt-1 text-[11px] font-medium leading-relaxed text-stone-500">{item.why_needed}</p>
+                      )}
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {CHECKLIST_ANSWER_OPTIONS.map((answer) => (
+                          <button
+                            key={answer}
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => setChecklistAnswers((prev) => ({ ...prev, [i]: prev[i] === answer ? '' : answer }))}
+                            className={`rounded-full border px-3 py-1.5 text-xs font-bold transition-colors ${
+                              checklistAnswers[i] === answer
+                                ? 'border-black bg-black text-white'
+                                : 'border-stone-300 bg-white text-stone-600 hover:border-black hover:text-black'
+                            }`}
+                          >
+                            {answer}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {selectedChecklistEntries.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-2 border-t border-stone-200 pt-3">
+                    {selectedChecklistEntries.map(({ index, item, answer }: { index: number; item: ChecklistItem; answer: string }) => (
+                      <button
+                        key={`${index}-${answer}`}
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => setChecklistAnswers((prev) => ({ ...prev, [index]: '' }))}
+                        className="rounded-full bg-black px-3 py-1.5 text-xs font-bold text-white"
+                      >
+                        {getChecklistLabel(item)}: {answer}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <input 
+                type="text"
+                placeholder="自由入力は任意だ。補足があればここに書け。"
+                value={brushUpText}
+                onChange={(e) => setBrushUpText(e.target.value)}
+                onFocus={() => setIsBrushUpInputFocused(true)}
+                onBlur={() => setIsBrushUpInputFocused(false)}
+                className="flex-grow bg-transparent px-4 py-3 text-md font-medium outline-none placeholder:text-stone-400"
+              />
+              <button 
+                type="submit"
+                disabled={!brushUpText.trim() && selectedChecklistEntries.length === 0}
+                className="clay-btn-primary p-4 rounded-2xl flex-shrink-0 disabled:opacity-50"
+              >
+                <Send className="w-5 h-5" />
+              </button>
+            </div>
           </form>
         </div>
         {error && (
