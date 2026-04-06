@@ -30,6 +30,26 @@ type DraftInitialReplyArgs = {
 
 type ToolPayload = Record<string, unknown>;
 
+const FUEI_LAW_SOURCE = {
+  provider: "e-Gov 法令検索",
+  title: "風俗営業等の規制及び業務の適正化等に関する法律",
+  law_id: "323AC0000000122",
+  law_number: "昭和二十三年法律第百二十二号",
+  version_id: "20251128_507AC0000000045",
+  version_date: "2025-11-28",
+  source_url: "https://laws.e-gov.go.jp/law/323AC0000000122/20251128_507AC0000000045",
+} as const;
+
+const FOOD_SANITATION_LAW_SOURCE = {
+  provider: "e-Gov 法令検索",
+  title: "食品衛生法",
+  law_id: "322AC0000000233",
+  law_number: "昭和二十二年法律第二百三十三号",
+  version_id: "20250601_504AC0000000068",
+  version_date: "2025-06-01",
+  source_url: "https://laws.e-gov.go.jp/law/322AC0000000233/20250601_504AC0000000068",
+} as const;
+
 function toStringArray(value: unknown, fallback: string[] = []): string[] {
   if (!Array.isArray(value)) {
     return fallback;
@@ -506,6 +526,10 @@ function createMcpServer() {
       max_results: z.number().default(10)
     },
     async (args) => {
+      const checkedOn = args.as_of_date || new Date().toISOString().split("T")[0];
+      const searchText = [...(args.issues ?? []), ...(args.keywords ?? [])].join(" ");
+      const needsSuccessionReference = /(承継|譲渡|相続|合併|分割|居抜き)/.test(searchText);
+
       return {
         content: [{
           type: "text",
@@ -513,27 +537,64 @@ function createMcpServer() {
             case_id: args.case_id,
             law_candidates: [
               {
-                law_id: "placeholder_law_id_1",
-                law_title: "風俗営業等の規制及び業務の適正化等に関する法律",
+                law_id: FUEI_LAW_SOURCE.law_id,
+                law_title: FUEI_LAW_SOURCE.title,
                 relevance_score: 0.95,
                 matched_terms: ["深夜営業", "接待", "酒類"],
                 why_relevant: "深夜営業および接待該当性の論点に関連",
+                references: [
+                  {
+                    citation: "第2条第1項第1号・第3項",
+                    summary: "接待を伴う営業類型と「接待」の定義を確認する起点。",
+                    egov_url: FUEI_LAW_SOURCE.source_url,
+                  },
+                  {
+                    citation: "第33条第1項",
+                    summary: "深夜における酒類提供飲食店営業の届出根拠。",
+                    egov_url: FUEI_LAW_SOURCE.source_url,
+                  },
+                ],
                 source: {
-                  provider: "e-Gov Law API v2",
-                  as_of_date: args.as_of_date || new Date().toISOString().split('T')[0]
-                }
+                  ...FUEI_LAW_SOURCE,
+                  checked_on: checkedOn,
+                },
               },
               {
-                law_id: "placeholder_law_id_2",
-                law_title: "食品衛生法",
+                law_id: FOOD_SANITATION_LAW_SOURCE.law_id,
+                law_title: FOOD_SANITATION_LAW_SOURCE.title,
                 relevance_score: 0.89,
                 matched_terms: ["飲食店営業"],
-                why_relevant: "飲食提供を伴う営業許可の根拠法令"
-              }
+                why_relevant: needsSuccessionReference
+                  ? "飲食店営業許可と営業承継可否の確認根拠"
+                  : "飲食提供を伴う営業許可の根拠法令",
+                references: [
+                  {
+                    citation: "第54条",
+                    summary: "営業施設の基準を都道府県条例で定める根拠。",
+                    egov_url: FOOD_SANITATION_LAW_SOURCE.source_url,
+                  },
+                  {
+                    citation: "第55条第1項・第2項",
+                    summary: "飲食店営業の許可と施設基準適合の要件。",
+                    egov_url: FOOD_SANITATION_LAW_SOURCE.source_url,
+                  },
+                  ...(needsSuccessionReference
+                    ? [{
+                      citation: "第56条第1項・第2項",
+                      summary: "営業譲渡等による許可営業者の地位承継と届出。",
+                      egov_url: FOOD_SANITATION_LAW_SOURCE.source_url,
+                    }]
+                    : []),
+                ],
+                source: {
+                  ...FOOD_SANITATION_LAW_SOURCE,
+                  checked_on: checkedOn,
+                },
+              },
             ],
             related_rules: [
               {
-                parent_law_title: "風俗営業等の規制及び業務の適正化等に関する法律",
+                parent_law_title: FUEI_LAW_SOURCE.title,
                 related_rule_hint: "施行規則・施行令の確認が必要"
               }
             ],
@@ -544,7 +605,20 @@ function createMcpServer() {
               needs_human_review: true,
               generated_at: new Date().toISOString(),
               server_version: "0.1.0",
-              sources: [{ provider: "e-Gov Law API v2", retrieved_at: new Date().toISOString() }]
+              sources: [
+                {
+                  provider: FUEI_LAW_SOURCE.provider,
+                  law_id: FUEI_LAW_SOURCE.law_id,
+                  source_url: FUEI_LAW_SOURCE.source_url,
+                  checked_on: checkedOn,
+                },
+                {
+                  provider: FOOD_SANITATION_LAW_SOURCE.provider,
+                  law_id: FOOD_SANITATION_LAW_SOURCE.law_id,
+                  source_url: FOOD_SANITATION_LAW_SOURCE.source_url,
+                  checked_on: checkedOn,
+                },
+              ]
             }
           }, null, 2)
         }]

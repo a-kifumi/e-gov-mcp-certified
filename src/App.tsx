@@ -14,9 +14,33 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
   return payload;
 }
 
+function openExternalUrl(url: string) {
+  const newWindow = window.open(url, '_blank', 'noopener,noreferrer');
+  if (!newWindow) {
+    window.location.href = url;
+  }
+}
+
 // --- Types ---
 type Issue = { issue_code?: string; label: string; confidence?: number; reason?: string };
-type LawCandidate = { law_title: string; relevance_score?: number; why_relevant?: string };
+type LawReference = { citation: string; summary?: string; egov_url?: string };
+type LawSource = {
+  provider?: string;
+  title?: string;
+  law_id?: string;
+  law_number?: string;
+  version_id?: string;
+  version_date?: string;
+  source_url?: string;
+  checked_on?: string;
+};
+type LawCandidate = {
+  law_title: string;
+  relevance_score?: number;
+  why_relevant?: string;
+  references?: LawReference[];
+  source?: LawSource;
+};
 type ChecklistItem = { item?: string; priority?: string; why_needed?: string; question_to_client?: string };
 type DraftReply = { subject: string; body: string; disclaimer_flags?: string[]; review_notes?: string[] };
 
@@ -37,10 +61,13 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<{role: 'user' | 'assistant', content: string}[]>([]);
 
-  const handleStartAnalysis = async (e?: React.FormEvent, isBrushUp = false) => {
+  const handleStartAnalysis = async (e?: React.FormEvent, isBrushUp = false, extraChecklistText = '') => {
     if (e) e.preventDefault();
+    
+    const finalBrushUp = [brushUpText.trim(), extraChecklistText.trim()].filter(Boolean).join('\n\n');
+    
     if (!consultationText.trim() && !isBrushUp) return;
-    if (isBrushUp && !brushUpText.trim()) return;
+    if (isBrushUp && !finalBrushUp) return;
 
     setError(null);
     setStage('analyzing');
@@ -48,8 +75,8 @@ export default function App() {
     // Setup the accumulative consultation context
     let fullContext = consultationText;
     if (isBrushUp) {
-      fullContext += `\n\n【追加の顧客回答・情報】：\n${brushUpText}`;
-      setHistory(prev => [...prev, { role: 'user', content: brushUpText }]);
+      fullContext += `\n\n【追加の顧客回答・情報】：\n${finalBrushUp}`;
+      setHistory(prev => [...prev, { role: 'user', content: finalBrushUp }]);
       setConsultationText(fullContext);
       setBrushUpText('');
     }
@@ -123,7 +150,7 @@ export default function App() {
             }}
             brushUpText={brushUpText}
             setBrushUpText={setBrushUpText}
-            onBrushUp={(e) => handleStartAnalysis(e, true)}
+            onBrushUp={(e: React.FormEvent, extra: string) => handleStartAnalysis(e, true, extra)}
             error={error}
           />
         )}
@@ -250,6 +277,23 @@ function AnalyzingView() {
 }
 
 function DashboardView({ caseData, clientName, onReset, brushUpText, setBrushUpText, onBrushUp, error }: any) {
+  const [checklistAnswers, setChecklistAnswers] = React.useState<Record<number, string>>({});
+
+  const handleBrushUpSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    let extraText = "";
+    Object.entries(checklistAnswers).forEach(([i, val]) => {
+      const item = caseData.checklist[parseInt(i)];
+      const q = item.question_to_client || item.item || '確認事項';
+      extraText += `- ${q} : ${val}\n`;
+    });
+    
+    if (extraText.trim() || brushUpText.trim()) {
+      onBrushUp(e, extraText);
+      setChecklistAnswers({});
+    }
+  };
+
   return (
     <motion.div 
       initial={{ opacity: 0 }}
@@ -304,6 +348,45 @@ function DashboardView({ caseData, clientName, onReset, brushUpText, setBrushUpT
                 <div key={i} className="clay-inset p-4">
                   <h4 className="font-bold text-md mb-1">{law.law_title}</h4>
                   <p className="text-stone-500 text-xs font-semibold">{law.why_relevant}</p>
+                  {law.references && law.references.length > 0 && (
+                    <div className="mt-4 space-y-2">
+                      {law.references.map((reference: LawReference, refIndex: number) => (
+                        <div key={`${i}-${refIndex}`} className="rounded-2xl bg-white/70 px-3 py-2 text-xs text-stone-700">
+                          <div className="font-semibold">{reference.citation}</div>
+                          {reference.summary && <p className="mt-1 text-stone-500">{reference.summary}</p>}
+                          {reference.egov_url && (
+                            <button
+                              type="button"
+                              onClick={() => openExternalUrl(reference.egov_url!)}
+                              className="mt-2 inline-block cursor-pointer bg-transparent p-0 text-left font-semibold underline underline-offset-2"
+                            >
+                              e-Gov 法令検索で確認
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {law.source && (
+                    <div className="mt-4 border-t border-stone-300 pt-3 text-[11px] leading-relaxed text-stone-500">
+                      出典:{" "}
+                      {law.source.source_url ? (
+                        <button
+                          type="button"
+                          onClick={() => openExternalUrl(law.source!.source_url!)}
+                          className="cursor-pointer bg-transparent p-0 font-semibold underline underline-offset-2"
+                        >
+                          {law.source.provider || "e-Gov 法令検索"}
+                        </button>
+                      ) : (
+                        <span className="font-semibold">{law.source.provider || "e-Gov 法令検索"}</span>
+                      )}{" "}
+                      {law.source.law_number && ` / ${law.source.law_number}`}
+                      {law.source.law_id && ` / 法令ID: ${law.source.law_id}`}
+                      {law.source.version_date && ` / 版日付: ${law.source.version_date}`}
+                      {law.source.checked_on && ` / 確認日: ${law.source.checked_on}`}
+                    </div>
+                  )}
                 </div>
               ))}
               {caseData.lawCandidates?.length === 0 && <p className="text-stone-400 font-medium">No specific laws triggered.</p>}
@@ -360,13 +443,28 @@ function DashboardView({ caseData, clientName, onReset, brushUpText, setBrushUpT
             
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {caseData.checklist?.map((item: ChecklistItem, i: number) => (
-                <div key={i} className="clay-inset p-5 flex items-start gap-4">
-                  <div className="mt-1 flex-shrink-0 w-6 h-6 rounded border-2 border-black opacity-30"></div>
+                <div key={i} className="clay-inset p-5 flex flex-col gap-4">
                   <div>
                     <h4 className="font-bold text-md mb-1">{item.item || item.question_to_client || '確認事項'}</h4>
                     {item.why_needed && (
                       <p className="text-stone-500 text-xs font-semibold">{item.why_needed}</p>
                     )}
+                  </div>
+                  <div className="flex flex-wrap gap-2 mt-auto pt-2 border-t border-stone-200/50">
+                    {['はい', 'いいえ', '検討中'].map(ans => (
+                      <button
+                        key={ans}
+                        type="button"
+                        onClick={() => setChecklistAnswers(prev => ({...prev, [i]: prev[i] === ans ? '' : ans}))}
+                        className={`px-3 py-1.5 text-xs font-bold rounded-full transition-colors border ${
+                          checklistAnswers[i] === ans 
+                            ? 'bg-black text-white border-black' 
+                            : 'bg-white text-stone-600 border-stone-200 hover:border-black'
+                        }`}
+                      >
+                        {ans}
+                      </button>
+                    ))}
                   </div>
                 </div>
               ))}
@@ -381,19 +479,19 @@ function DashboardView({ caseData, clientName, onReset, brushUpText, setBrushUpT
       <div className="fixed bottom-0 left-0 w-full p-6 z-50">
         <div className="max-w-[1400px] mx-auto flex items-end justify-center md:justify-end">
           <form 
-            onSubmit={onBrushUp}
+            onSubmit={handleBrushUpSubmit}
             className="w-full md:w-1/2 clay-card p-3 flex gap-3 backdrop-blur-md bg-[#e8eaed]/90"
           >
             <input 
               type="text"
-              placeholder="顧客の追加質問や事実を入力してブラッシュアップ..."
+              placeholder="顧客の追加質問を入力するか、不足情報を選択して送信..."
               value={brushUpText}
               onChange={(e) => setBrushUpText(e.target.value)}
               className="flex-grow bg-transparent px-4 py-3 text-md font-medium outline-none placeholder:text-stone-400"
             />
             <button 
               type="submit"
-              disabled={!brushUpText.trim()}
+              disabled={!brushUpText.trim() && Object.values(checklistAnswers).filter(Boolean).length === 0}
               className="clay-btn-primary p-4 rounded-2xl flex-shrink-0 disabled:opacity-50"
             >
               <Send className="w-5 h-5" />
