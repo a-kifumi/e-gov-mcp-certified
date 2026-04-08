@@ -1,79 +1,10 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { ChevronRight, FileText, Scale, CheckSquare, MessageSquare, RefreshCw, Send, AlertTriangle, Copy, Check } from 'lucide-react';
-
-// --- API Utils ---
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const payload = (await response.json()) as T & { error?: string };
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
-  return payload;
-}
-
-function openExternalUrl(url: string) {
-  const newWindow = window.open(url, '_blank', 'noopener,noreferrer');
-  if (!newWindow) {
-    window.location.href = url;
-  }
-}
-
-async function copyTextToClipboard(text: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textArea = document.createElement('textarea');
-  textArea.value = text;
-  textArea.setAttribute('readonly', 'true');
-  textArea.style.position = 'absolute';
-  textArea.style.left = '-9999px';
-  document.body.appendChild(textArea);
-  textArea.select();
-  document.execCommand('copy');
-  document.body.removeChild(textArea);
-}
-
-// --- Types ---
-type Issue = { issue_code?: string; label: string; confidence?: number; reason?: string };
-type LawReference = { citation: string; summary?: string; egov_url?: string };
-type LawSource = {
-  provider?: string;
-  title?: string;
-  law_id?: string;
-  law_number?: string;
-  version_id?: string;
-  version_date?: string;
-  source_url?: string;
-  checked_on?: string;
-};
-type LawCandidate = {
-  law_title: string;
-  relevance_score?: number;
-  why_relevant?: string;
-  references?: LawReference[];
-  source?: LawSource;
-};
-type ChecklistItem = { item?: string; priority?: string; why_needed?: string; question_to_client?: string };
-type DraftReply = { subject: string; body: string; disclaimer_flags?: string[]; review_notes?: string[] };
-
-type CaseData = {
-  issues: Issue[];
-  lawCandidates: LawCandidate[];
-  checklist: ChecklistItem[];
-  draftReply: DraftReply;
-  missingFacts: string[];
-};
-
-const CHECKLIST_ANSWER_OPTIONS = ['はい', 'いいえ', '確認中'] as const;
-
-function getChecklistLabel(item: ChecklistItem) {
-  return item.question_to_client || item.item || '確認事項';
-}
+import React, { useState } from 'react';
+import { AnimatePresence } from 'motion/react';
+import type { CaseData, ChatMessage, ChecklistItem, ProgressState, WorkflowEvent } from './types';
+import { streamCaseWorkflow, requestDashboardChat, buildPlaceholderTimeline, parseWorkflowToCaseData, localizeUiMessage, buildChecklistAnswerSummary, buildReanalysisRequestText, getChecklistLabel } from './utils';
+import IntakeView from './components/IntakeView';
+import AnalyzingView from './components/AnalyzingView';
+import DashboardView from './components/DashboardView';
 
 export default function App() {
   const [stage, setStage] = useState<'intake' | 'analyzing' | 'dashboard'>('intake');
@@ -82,63 +13,160 @@ export default function App() {
   const [caseData, setCaseData] = useState<CaseData | null>(null);
   const [brushUpText, setBrushUpText] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [history, setHistory] = useState<{role: 'user' | 'assistant', content: string}[]>([]);
+  const [history, setHistory] = useState<ChatMessage[]>([]);
+  const [progressState, setProgressState] = useState<ProgressState | null>(null);
+  const [isChatSubmitting, setIsChatSubmitting] = useState(false);
 
-  const handleStartAnalysis = async (e?: React.FormEvent, isBrushUp = false, extraChecklistText = '') => {
-    if (e) e.preventDefault();
-    
-    const finalBrushUp = [brushUpText.trim(), extraChecklistText.trim()].filter(Boolean).join('\n\n');
-    
-    if (!consultationText.trim() && !isBrushUp) return;
-    if (isBrushUp && !finalBrushUp) return;
-
+  const runAnalysis = async ({
+    requestText,
+    resetHistory,
+    fallbackStage,
+    successHistoryMessage,
+  }: {
+    requestText: string;
+    resetHistory?: boolean;
+    fallbackStage?: 'intake' | 'dashboard';
+    successHistoryMessage?: string;
+  }) => {
+    if (!requestText.trim()) return;
     setError(null);
     setStage('analyzing');
-
-    // Setup the accumulative consultation context
-    let fullContext = consultationText;
-    if (isBrushUp) {
-      fullContext += `\n\n【追加の顧客回答・情報】：\n${finalBrushUp}`;
-      setHistory(prev => [...prev, { role: 'user', content: finalBrushUp }]);
-      setConsultationText(fullContext);
-      setBrushUpText('');
-    }
+    setProgressState({
+      message: '解析の準備をしています。',
+      timeline: buildPlaceholderTimeline(),
+      trace: null,
+    });
 
     try {
-      const response = await postJson<{ content: { text: string }[] }>('/api/tool', {
-        name: 'run_full_case_workflow',
-        arguments: {
+      let finalWorkflow: WorkflowEvent['workflow'] | undefined;
+
+      await streamCaseWorkflow(
+        {
           case_id: `case-${Date.now()}`,
-          request_text: fullContext,
+          request_text: requestText,
           client_name: clientName || 'お客様',
           domain_hint: 'auto',
           include_disclaimer: true,
+          output_language: 'ja',
         },
-      });
+        (event) => {
+          if (event.type === 'error') {
+            throw new Error(localizeUiMessage(event.error || event.message));
+          }
 
-      const parsedInner = JSON.parse(response.content[0].text);
-      const outputs = parsedInner.outputs || {};
-      
-      const newCaseData: CaseData = {
-        issues: outputs.issues?.issues || [],
-        missingFacts: outputs.issues?.missing_facts || [],
-        lawCandidates: outputs.related_laws?.law_candidates || [],
-        checklist: outputs.missing_information?.checklist || [],
-        draftReply: outputs.draft_reply || { subject: 'No subject', body: 'No body generated.' },
-      };
+      setProgressState({
+            message: localizeUiMessage(event.message),
+            timeline: event.timeline.length > 0 ? event.timeline : buildPlaceholderTimeline(),
+            trace: event.trace || null,
+          });
 
+          if (event.type === 'complete' && event.workflow) {
+            finalWorkflow = event.workflow;
+          }
+        },
+      );
+
+      if (!finalWorkflow) {
+        throw new Error('解析結果を受信できませんでした。');
+      }
+
+      const newCaseData = parseWorkflowToCaseData(finalWorkflow);
       setCaseData(newCaseData);
-      
-      if (isBrushUp) {
-        setHistory(prev => [...prev, { role: 'assistant', content: '情報を更新しました。' }]);
-      } else {
-        setHistory([{ role: 'user', content: consultationText }]);
+      setConsultationText(requestText);
+      setProgressState(null);
+      if (resetHistory) {
+        setHistory([
+          {
+            role: 'assistant',
+            content: successHistoryMessage || '追加で質問があればどうぞ。',
+          },
+        ]);
+      } else if (successHistoryMessage) {
+        setHistory((prev) => [...prev, { role: 'assistant', content: successHistoryMessage }]);
       }
 
       setStage('dashboard');
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setStage(isBrushUp && caseData ? 'dashboard' : 'intake');
+      setProgressState(null);
+      setError(localizeUiMessage(err instanceof Error ? err.message : String(err)));
+      setStage(fallbackStage || 'intake');
+    }
+  };
+
+  const handleStartAnalysis = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    await runAnalysis({
+      requestText: consultationText,
+      resetHistory: true,
+      fallbackStage: 'intake',
+    });
+  };
+
+  const handleDashboardReanalysis = async (
+    message: string,
+    selectedChecklistEntries: Array<{ item: ChecklistItem; answer: string }>,
+  ) => {
+    if (!caseData) return;
+
+    const pendingMessage = message.trim();
+    const answerSummary = buildChecklistAnswerSummary(selectedChecklistEntries);
+    const combinedMessage = [pendingMessage, answerSummary].filter(Boolean).join('\n\n');
+    if (!combinedMessage) return;
+
+    const requestText = buildReanalysisRequestText({
+      consultationText,
+      history,
+      pendingMessage,
+      selectedChecklistEntries,
+    });
+
+    setError(null);
+    setHistory((prev) => [...prev, { role: 'user', content: combinedMessage }]);
+    setBrushUpText('');
+
+    await runAnalysis({
+      requestText,
+      fallbackStage: 'dashboard',
+      successHistoryMessage: 'チャット内容と追加回答を踏まえて、解析結果を更新したぜ。',
+      resetHistory: false,
+    });
+  };
+
+  const handleDashboardChat = async (message: string, selectedChecklistEntries: Array<{ item: ChecklistItem; answer: string }>) => {
+    if (!caseData) return;
+
+    const trimmedMessage = message.trim();
+    const answerSummary = buildChecklistAnswerSummary(selectedChecklistEntries);
+    const combinedMessage = [trimmedMessage, answerSummary].filter(Boolean).join('\n\n');
+    if (!combinedMessage) return;
+
+    setError(null);
+    setIsChatSubmitting(true);
+    setHistory((prev) => [...prev, { role: 'user', content: combinedMessage }]);
+    setBrushUpText('');
+    try {
+      const response = await requestDashboardChat({
+        consultation_text: consultationText,
+        client_name: clientName || 'お客様',
+        user_message: trimmedMessage,
+        history,
+        selected_checklist_entries: selectedChecklistEntries.map(({ item, answer }) => ({
+          label: getChecklistLabel(item),
+          answer,
+        })),
+        case_data: {
+          issues: caseData.issues,
+          lawCandidates: caseData.lawCandidates,
+          checklist: caseData.checklist,
+          draftReply: caseData.draftReply,
+        },
+      });
+
+      setHistory((prev) => [...prev, { role: 'assistant', content: response.reply || '応答を受信できませんでした。' }]);
+    } catch (err) {
+      setError(localizeUiMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsChatSubmitting(false);
     }
   };
 
@@ -146,8 +174,7 @@ export default function App() {
     <div className="min-h-screen bg-[#e8eaed] text-[#111111] overflow-hidden selection:bg-black selection:text-white pb-24">
       <AnimatePresence mode="wait">
         {stage === 'intake' && (
-          <IntakeView 
-            key="intake"
+          <IntakeView
             clientName={clientName}
             setClientName={setClientName}
             consultationText={consultationText}
@@ -156,464 +183,38 @@ export default function App() {
             error={error}
           />
         )}
-        
-        {stage === 'analyzing' && <AnalyzingView key="analyzing" />}
+
+        {stage === 'analyzing' && (
+          <AnalyzingView
+            progressState={progressState}
+          />
+        )}
 
         {stage === 'dashboard' && caseData && (
-          <DashboardView 
-            key="dashboard"
+          <DashboardView
             caseData={caseData}
             clientName={clientName}
             onReset={() => {
               setCaseData(null);
               setConsultationText('');
               setClientName('');
+              setBrushUpText('');
+              setError(null);
+              setIsChatSubmitting(false);
               setHistory([]);
+              setProgressState(null);
               setStage('intake');
             }}
             brushUpText={brushUpText}
             setBrushUpText={setBrushUpText}
-            onBrushUp={(e: React.FormEvent, extra: string) => handleStartAnalysis(e, true, extra)}
+            history={history}
+            onChatSubmit={handleDashboardChat}
+            onReanalyzeSubmit={handleDashboardReanalysis}
+            isChatSubmitting={isChatSubmitting}
             error={error}
           />
         )}
       </AnimatePresence>
     </div>
-  );
-}
-
-const PRESETS = [
-  {
-    label: "飲食店(深夜営業)",
-    clientName: "バーテンダー 山田",
-    consultationText: "駅前でダーツバーを開業しようと思っています。\nお酒を提供しつつ、お客様と一緒にゲームを楽しめるスタイルを予定しています。\n朝の5時ごろまで営業したいのですが、何か特別な手続きや許可は必要でしょうか？\n店舗面積は15坪ほどで、カウンター席とボックス席があります。",
-  },
-  {
-    label: "建設業許可(新規)",
-    clientName: "株式会社ビルド・タナカ",
-    consultationText: "現在、個人事業主として大工仕事や内装トラブルの修繕を請け負っています。\n来月から法人成りして、500万円以上のリフォーム工事も受注していきたいと考えています。\n自分は10年以上実務経験がありますが、国家資格は持っていません。\nどのような条件を満たせば許可が取れますか？",
-  },
-  {
-    label: "外国人在留資格",
-    clientName: "IT企業 採用担当",
-    consultationText: "この度、ベトナム国籍のエンジニアを採用することになりました。\n彼は日本の専門学校で「情報処理」を学んで来月卒業予定です。\n弊社では主にウェブアプリケーションの開発やサーバー保守を担当してもらう予定です。\nビザの変更手続きが必要だと思うのですが、どのような書類やフローになりますか？",
-  }
-];
-
-function IntakeView({ clientName, setClientName, consultationText, setConsultationText, onSubmit, error }: any) {
-  return (
-    <motion.div 
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -20 }}
-      className="max-w-4xl mx-auto pt-[10vh] lg:pt-[15vh] px-6"
-    >
-      <div className="mb-12">
-        <h1 className="text-6xl md:text-8xl tracking-tight mb-4 text-black">Triage.</h1>
-        <p className="text-xl text-stone-500 font-medium">Automatic Intake & Case Structuring</p>
-      </div>
-
-      <form onSubmit={onSubmit} className="space-y-12">
-        <div className="clay-panel p-8 md:p-12 space-y-8">
-          
-          <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
-            <span className="text-xs font-bold uppercase tracking-widest text-stone-400 mr-2">Quick Presets:</span>
-            <div className="flex flex-wrap gap-2">
-              {PRESETS.map((preset, idx) => (
-                <button
-                  key={idx}
-                  type="button"
-                  onClick={() => {
-                    setClientName(preset.clientName);
-                    setConsultationText(preset.consultationText);
-                  }}
-                  className="px-4 py-2 text-xs font-bold bg-[#e8eaed] text-stone-600 rounded-full border border-stone-300 hover:text-black hover:border-black transition-colors"
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="space-y-3 pt-4 border-t border-stone-300/50">
-            <label className="block text-sm font-bold uppercase tracking-widest text-stone-400">Client Name</label>
-            <input 
-              type="text" 
-              placeholder="Ex: 鈴木 太郎"
-              value={clientName}
-              onChange={(e) => setClientName(e.target.value)}
-              className="w-full bg-transparent border-b-2 border-stone-300 focus:border-black py-3 text-2xl font-medium outline-none transition-colors placeholder:text-stone-300"
-            />
-          </div>
-
-          <div className="space-y-3">
-            <label className="block text-sm font-bold uppercase tracking-widest text-stone-400">Consultation Details</label>
-            <textarea 
-              placeholder="ご相談内容をこちらにペーストしてください..."
-              value={consultationText}
-              onChange={(e) => setConsultationText(e.target.value)}
-              rows={6}
-              className="w-full clay-inset p-6 text-lg font-medium outline-none resize-y placeholder:text-stone-400"
-            />
-          </div>
-          
-          {error && (
-            <div className="bg-red-100 text-red-700 p-4 rounded-xl flex items-center gap-3 text-sm font-medium">
-              <AlertTriangle className="w-5 h-5 flex-shrink-0" />
-              {error}
-            </div>
-          )}
-        </div>
-
-        <div className="flex justify-end">
-          <button 
-            type="submit"
-            disabled={!consultationText.trim()}
-            className="clay-btn-primary px-10 py-5 text-lg font-bold flex items-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed uppercase tracking-wider"
-          >
-            Start Analysis
-            <ChevronRight className="w-6 h-6" />
-          </button>
-        </div>
-      </form>
-    </motion.div>
-  );
-}
-
-function AnalyzingView() {
-  return (
-    <motion.div 
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="min-h-screen flex flex-col items-center justify-center font-bold text-center"
-    >
-      <motion.div 
-        animate={{ rotate: 360 }}
-        transition={{ duration: 3, ease: "linear", repeat: Infinity }}
-        className="w-24 h-24 border-[12px] border-stone-200 border-t-black rounded-full mb-12"
-      />
-      <h2 className="text-4xl md:text-5xl tracking-tight mb-4">Processing Case</h2>
-      <p className="text-stone-500 text-xl font-medium">Extracting issues, retrieving laws, generating replies...</p>
-    </motion.div>
-  );
-}
-
-function DashboardView({ caseData, clientName, onReset, brushUpText, setBrushUpText, onBrushUp, error }: any) {
-  const [checklistAnswers, setChecklistAnswers] = React.useState<Record<number, string>>({});
-  const [isBrushUpInputFocused, setIsBrushUpInputFocused] = React.useState(false);
-  const [draftCopied, setDraftCopied] = React.useState(false);
-  const selectedChecklistEntries = caseData.checklist
-    .map((item: ChecklistItem, index: number) => ({ index, item, answer: checklistAnswers[index] || '' }))
-    .filter((entry) => Boolean(entry.answer));
-
-  const handleDraftCopy = async () => {
-    if (!caseData.draftReply?.body) return;
-
-    try {
-      await copyTextToClipboard(caseData.draftReply.body);
-      setDraftCopied(true);
-      window.setTimeout(() => setDraftCopied(false), 1600);
-    } catch (copyError) {
-      console.error('Failed to copy draft reply body', copyError);
-    }
-  };
-
-  const handleBrushUpSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    let extraText = "";
-    Object.entries(checklistAnswers).forEach(([i, val]) => {
-      const item = caseData.checklist[parseInt(i)];
-      const q = getChecklistLabel(item);
-      extraText += `- ${q} : ${val}\n`;
-    });
-    
-    if (extraText.trim() || brushUpText.trim()) {
-      onBrushUp(e, extraText);
-      setChecklistAnswers({});
-    }
-  };
-
-  return (
-    <motion.div 
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="max-w-[1400px] mx-auto px-6 py-12"
-    >
-      {/* Header */}
-      <div className="flex justify-between items-center mb-12">
-        <div>
-          <h1 className="text-4xl md:text-5xl tracking-tight font-black mb-2">{clientName || 'お客様'}の事案</h1>
-          <p className="text-stone-500 font-medium">Intake Dashboard</p>
-        </div>
-        <button 
-          onClick={onReset} 
-          className="clay-btn p-4 rounded-full text-stone-500 hover:text-black"
-          title="New Case"
-        >
-          <RefreshCw className="w-6 h-6" />
-        </button>
-      </div>
-
-      {/* Swiss Grid Layout */}
-      <div className="swiss-grid">
-        
-        {/* Left Column: Triage & Data */}
-        <div className="col-span-12 lg:col-span-4 space-y-8">
-          
-          <div className="clay-card p-8">
-            <h3 className="flex items-center gap-3 text-lg font-bold uppercase tracking-widest text-stone-400 mb-6">
-              <FileText className="w-5 h-5" />
-              Identified Issues
-            </h3>
-            <div className="space-y-4">
-              {caseData.issues?.map((issue: Issue, i: number) => (
-                <div key={i} className="border-l-4 border-black pl-5 py-1">
-                  <h4 className="font-bold text-lg">{issue.label}</h4>
-                  {issue.reason && <p className="text-stone-500 text-sm mt-1 leading-relaxed">{issue.reason}</p>}
-                </div>
-              ))}
-              {caseData.issues?.length === 0 && <p className="text-stone-400 font-medium">No clear issues identified.</p>}
-            </div>
-          </div>
-
-          <div className="clay-card p-8">
-            <h3 className="flex items-center gap-3 text-lg font-bold uppercase tracking-widest text-stone-400 mb-6">
-              <Scale className="w-5 h-5" />
-              Relevant Laws
-            </h3>
-            <div className="space-y-4">
-              {caseData.lawCandidates?.map((law: LawCandidate, i: number) => (
-                <div key={i} className="clay-inset p-4">
-                  <h4 className="font-bold text-md mb-1">{law.law_title}</h4>
-                  <p className="text-stone-500 text-xs font-semibold">{law.why_relevant}</p>
-                  {law.references && law.references.length > 0 && (
-                    <div className="mt-4 space-y-2">
-                      {law.references.map((reference: LawReference, refIndex: number) => (
-                        <div key={`${i}-${refIndex}`} className="rounded-2xl bg-white/70 px-3 py-2 text-xs text-stone-700">
-                          <div className="font-semibold">{reference.citation}</div>
-                          {reference.summary && <p className="mt-1 text-stone-500">{reference.summary}</p>}
-                          {reference.egov_url && (
-                            <button
-                              type="button"
-                              onClick={() => openExternalUrl(reference.egov_url!)}
-                              className="mt-2 inline-block cursor-pointer bg-transparent p-0 text-left font-semibold underline underline-offset-2"
-                            >
-                              e-Gov 法令検索で確認
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {law.source && (
-                    <div className="mt-4 border-t border-stone-300 pt-3 text-[11px] leading-relaxed text-stone-500">
-                      出典:{" "}
-                      {law.source.source_url ? (
-                        <button
-                          type="button"
-                          onClick={() => openExternalUrl(law.source!.source_url!)}
-                          className="cursor-pointer bg-transparent p-0 font-semibold underline underline-offset-2"
-                        >
-                          {law.source.provider || "e-Gov 法令検索"}
-                        </button>
-                      ) : (
-                        <span className="font-semibold">{law.source.provider || "e-Gov 法令検索"}</span>
-                      )}{" "}
-                      {law.source.law_number && ` / ${law.source.law_number}`}
-                      {law.source.law_id && ` / 法令ID: ${law.source.law_id}`}
-                      {law.source.version_date && ` / 版日付: ${law.source.version_date}`}
-                      {law.source.checked_on && ` / 確認日: ${law.source.checked_on}`}
-                    </div>
-                  )}
-                </div>
-              ))}
-              {caseData.lawCandidates?.length === 0 && <p className="text-stone-400 font-medium">No specific laws triggered.</p>}
-            </div>
-          </div>
-
-        </div>
-
-        {/* Right Column: Output & Actionable */}
-        <div className="col-span-12 lg:col-span-8 flex flex-col gap-8">
-          
-          {/* Main Actionable Box: Draft Reply */}
-          <div className="clay-card p-8 md:p-12 flex-grow bg-white">
-            <div className="flex justify-between items-start mb-8">
-              <h3 className="flex items-center gap-3 text-lg font-bold uppercase tracking-widest text-stone-400">
-                <MessageSquare className="w-5 h-5" />
-                Draft Initial Reply
-              </h3>
-              <button
-                type="button"
-                onClick={handleDraftCopy}
-                className="rounded-full border border-stone-300 p-3 text-stone-500 transition-colors hover:border-black hover:text-black"
-                aria-label="Draft Initial Reply の本文をコピー"
-                title={draftCopied ? 'Copied' : 'Copy body'}
-              >
-                {draftCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-              </button>
-            </div>
-            
-            <div className="clay-inset relative w-full overflow-hidden rounded-2xl bg-[#fcfcfc] p-6 text-left md:p-8">
-              <div className="absolute top-0 left-0 w-2 h-full bg-black"></div>
-              {caseData.draftReply.subject && (
-                <h4 className="text-2xl font-bold mb-6 pb-6 border-b border-stone-200">
-                  {caseData.draftReply.subject}
-                </h4>
-              )}
-              <div className="whitespace-pre-wrap font-medium leading-relaxed text-lg text-stone-800">
-                {caseData.draftReply.body}
-              </div>
-            </div>
-
-            {/* Caveats */}
-            {caseData.draftReply.review_notes && caseData.draftReply.review_notes.length > 0 && (
-              <div className="mt-8 pt-8 border-t border-stone-200">
-                <h4 className="text-xs font-bold uppercase tracking-widest text-stone-400 mb-3">Review Notes</h4>
-                <ul className="flex flex-wrap gap-2">
-                  {caseData.draftReply.review_notes.map((note: string, i: number) => (
-                    <li key={i} className="bg-red-100 text-red-800 px-3 py-1 rounded-full text-xs font-bold">
-                      {note}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-
-          {/* Missing Information Checklist */}
-          <div className="clay-card p-8">
-            <h3 className="flex items-center gap-3 text-lg font-bold uppercase tracking-widest text-stone-400 mb-6">
-              <CheckSquare className="w-5 h-5" />
-              Information Checklist
-            </h3>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {caseData.checklist?.map((item: ChecklistItem, i: number) => (
-                <div key={i} className="clay-inset p-5 flex flex-col gap-4">
-                  <div>
-                    <h4 className="font-bold text-md mb-1">{getChecklistLabel(item)}</h4>
-                    {item.why_needed && (
-                      <p className="text-stone-500 text-xs font-semibold">{item.why_needed}</p>
-                    )}
-                  </div>
-                  <div className="mt-auto pt-2 border-t border-stone-200/50">
-                    <p className="text-xs font-bold uppercase tracking-widest text-stone-400">
-                      下のチャット欄で選択して回答
-                    </p>
-                  </div>
-                </div>
-              ))}
-              {caseData.checklist?.length === 0 && <p className="text-stone-400 font-medium">No missing information detected.</p>}
-            </div>
-          </div>
-          
-        </div>
-      </div>
-
-      {/* Floating Brush Up / Interactivity Bar */}
-      <div className="fixed bottom-0 left-0 w-full p-6 z-50">
-        <div className="max-w-[1400px] mx-auto flex items-end justify-center md:justify-end">
-          <form 
-            onSubmit={handleBrushUpSubmit}
-            className="w-full md:w-[42rem] clay-card p-3 backdrop-blur-md bg-[#e8eaed]/90"
-          >
-            {caseData.checklist?.length > 0 && isBrushUpInputFocused && (
-              <div className="mb-3 rounded-[1.75rem] border border-stone-300/70 bg-white/70 p-4">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-xs font-bold uppercase tracking-widest text-stone-400">Quick Answers</p>
-                    <p className="text-sm font-medium text-stone-600">不足情報はここで選ぶだけで送れるぜ。</p>
-                  </div>
-                  {selectedChecklistEntries.length > 0 && (
-                    <button
-                      type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => setChecklistAnswers({})}
-                      className="text-xs font-bold text-stone-500 underline underline-offset-2"
-                    >
-                      選択をクリア
-                    </button>
-                  )}
-                </div>
-
-                <div className="max-h-52 space-y-3 overflow-y-auto pr-1">
-                  {caseData.checklist.map((item: ChecklistItem, i: number) => (
-                    <div key={i} className="rounded-2xl bg-[#f6f6f4] px-3 py-3">
-                      <p className="text-sm font-bold leading-snug text-stone-800">{getChecklistLabel(item)}</p>
-                      {item.why_needed && (
-                        <p className="mt-1 text-[11px] font-medium leading-relaxed text-stone-500">{item.why_needed}</p>
-                      )}
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {CHECKLIST_ANSWER_OPTIONS.map((answer) => (
-                          <button
-                            key={answer}
-                            type="button"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => setChecklistAnswers((prev) => ({ ...prev, [i]: prev[i] === answer ? '' : answer }))}
-                            className={`rounded-full border px-3 py-1.5 text-xs font-bold transition-colors ${
-                              checklistAnswers[i] === answer
-                                ? 'border-black bg-black text-white'
-                                : 'border-stone-300 bg-white text-stone-600 hover:border-black hover:text-black'
-                            }`}
-                          >
-                            {answer}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                {selectedChecklistEntries.length > 0 && (
-                  <div className="mt-3 flex flex-wrap gap-2 border-t border-stone-200 pt-3">
-                    {selectedChecklistEntries.map(({ index, item, answer }: { index: number; item: ChecklistItem; answer: string }) => (
-                      <button
-                        key={`${index}-${answer}`}
-                        type="button"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => setChecklistAnswers((prev) => ({ ...prev, [index]: '' }))}
-                        className="rounded-full bg-black px-3 py-1.5 text-xs font-bold text-white"
-                      >
-                        {getChecklistLabel(item)}: {answer}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="flex gap-3">
-              <input 
-                type="text"
-                placeholder="自由入力は任意だ。補足があればここに書け。"
-                value={brushUpText}
-                onChange={(e) => setBrushUpText(e.target.value)}
-                onFocus={() => setIsBrushUpInputFocused(true)}
-                onBlur={() => setIsBrushUpInputFocused(false)}
-                className="flex-grow bg-transparent px-4 py-3 text-md font-medium outline-none placeholder:text-stone-400"
-              />
-              <button 
-                type="submit"
-                disabled={!brushUpText.trim() && selectedChecklistEntries.length === 0}
-                className="clay-btn-primary p-4 rounded-2xl flex-shrink-0 disabled:opacity-50"
-              >
-                <Send className="w-5 h-5" />
-              </button>
-            </div>
-          </form>
-        </div>
-        {error && (
-          <div className="max-w-[1400px] mx-auto mt-2">
-            <div className="bg-red-100 text-red-700 p-3 rounded-lg text-sm font-bold text-center">
-              Error applying brush up: {error}
-            </div>
-          </div>
-        )}
-      </div>
-
-    </motion.div>
   );
 }

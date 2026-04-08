@@ -11,6 +11,7 @@ export type OpenRouterConfig = {
   primaryModel: string;
   fallbackModels: string[];
   models: string[];
+  timeoutMs: number;
   appName: string;
   siteUrl?: string;
 };
@@ -21,14 +22,26 @@ export type PublicOpenRouterConfig = Omit<OpenRouterConfig, 'apiKey'> & {
 
 export type OpenRouterChatResult = {
   attemptedModels: string[];
+  attempts: OpenRouterAttempt[];
   content: string;
   model: string;
   raw: unknown;
 };
 
+export type OpenRouterAttempt = {
+  model: string;
+  status: 'success' | 'error';
+  startedAt: string;
+  completedAt: string;
+  content?: string;
+  raw?: unknown;
+  error?: string;
+};
+
 const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
-const DEFAULT_PRIMARY_MODEL = 'qwen/qwen3.6-plus:free';
-const DEFAULT_FALLBACK_MODELS = ['stepfun/step-3.5-flash:free'];
+const DEFAULT_PRIMARY_MODEL = 'google/gemma-4-31b-it';
+const DEFAULT_FALLBACK_MODELS = ['qwen/qwen3.5-35b-a3b'];
+const DEFAULT_TIMEOUT_MS = 45000;
 const DEFAULT_APP_NAME = 'legal-intake-egov-mcp';
 
 function uniqueModels(models: string[]): string[] {
@@ -52,30 +65,53 @@ function parseModelList(raw?: string): string[] {
     .filter(Boolean) ?? [];
 }
 
+function collectTextSegments(value: unknown, depth = 0): string[] {
+  if (depth > 5 || value == null) {
+    return [];
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectTextSegments(item, depth + 1));
+  }
+
+  if (typeof value !== 'object') {
+    return [];
+  }
+
+  const record = value as Record<string, unknown>;
+  const preferredKeys = ['text', 'content', 'output_text', 'message', 'reasoning'];
+  const segments: string[] = [];
+
+  for (const key of preferredKeys) {
+    if (key in record) {
+      segments.push(...collectTextSegments(record[key], depth + 1));
+    }
+  }
+
+  if (segments.length > 0) {
+    return segments;
+  }
+
+  return Object.values(record).flatMap((item) => collectTextSegments(item, depth + 1));
+}
+
 function extractAssistantText(content: unknown): string {
-  if (typeof content === 'string') {
-    return content.trim();
-  }
-
-  if (!Array.isArray(content)) {
-    return '';
-  }
-
-  return content
-    .map((part) => {
-      if (typeof part === 'string') {
-        return part;
-      }
-
-      if (part && typeof part === 'object' && 'text' in part) {
-        const text = part.text;
-        return typeof text === 'string' ? text : '';
-      }
-
-      return '';
-    })
+  return collectTextSegments(content)
     .join('\n')
     .trim();
+}
+
+function summarizePayload(payload: unknown): string {
+  try {
+    return JSON.stringify(payload).slice(0, 1000);
+  } catch {
+    return String(payload).slice(0, 1000);
+  }
 }
 
 async function safeErrorBody(response: Response): Promise<string> {
@@ -92,6 +128,8 @@ export function getOpenRouterConfig(env: EnvSource = process.env): OpenRouterCon
   const fallbackModels = parseModelList(env.OPENROUTER_FALLBACK_MODELS);
   const effectiveFallbacks = fallbackModels.length > 0 ? fallbackModels : DEFAULT_FALLBACK_MODELS;
   const models = uniqueModels([primaryModel, ...effectiveFallbacks]).filter(Boolean);
+  const parsedTimeout = Number.parseInt(env.OPENROUTER_TIMEOUT_MS?.trim() || '', 10);
+  const timeoutMs = Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : DEFAULT_TIMEOUT_MS;
 
   return {
     apiKey: env.OPENROUTER_API_KEY?.trim() || undefined,
@@ -99,6 +137,7 @@ export function getOpenRouterConfig(env: EnvSource = process.env): OpenRouterCon
     primaryModel,
     fallbackModels: models.filter((model) => model !== primaryModel),
     models,
+    timeoutMs,
     appName: env.OPENROUTER_APP_NAME?.trim() || DEFAULT_APP_NAME,
     siteUrl: env.APP_URL?.trim() || undefined,
   };
@@ -113,6 +152,7 @@ export function getPublicOpenRouterConfig(env: EnvSource = process.env): PublicO
     primaryModel: config.primaryModel,
     fallbackModels: config.fallbackModels,
     models: config.models,
+    timeoutMs: config.timeoutMs,
     appName: config.appName,
     siteUrl: config.siteUrl,
   };
@@ -124,6 +164,7 @@ export async function createOpenRouterChatCompletion(
     maxTokens?: number;
     models?: string[];
     temperature?: number;
+    onAttempt?: (attempt: OpenRouterAttempt) => void;
   },
   env: EnvSource = process.env,
 ): Promise<OpenRouterChatResult> {
@@ -134,15 +175,22 @@ export async function createOpenRouterChatCompletion(
   }
 
   const attemptedModels: string[] = [];
+  const attempts: OpenRouterAttempt[] = [];
   const models = uniqueModels(options?.models?.length ? options.models : config.models);
-  let lastError: Error | undefined;
+  const modelErrors: string[] = [];
 
   for (const model of models) {
     attemptedModels.push(model);
+    const startedAt = new Date().toISOString();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort(new Error(`OpenRouter request timed out after ${config.timeoutMs}ms`));
+    }, config.timeoutMs);
 
     try {
       const response = await fetch(`${config.baseUrl}/chat/completions`, {
         method: 'POST',
+        signal: controller.signal,
         headers: {
           Authorization: `Bearer ${config.apiKey}`,
           'Content-Type': 'application/json',
@@ -156,6 +204,7 @@ export async function createOpenRouterChatCompletion(
           max_tokens: options?.maxTokens ?? 900,
         }),
       });
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const body = await safeErrorBody(response);
@@ -164,31 +213,66 @@ export async function createOpenRouterChatCompletion(
 
       const payload = (await response.json()) as {
         choices?: Array<{
+          text?: unknown;
           message?: {
             content?: unknown;
+            reasoning?: unknown;
           };
         }>;
       };
 
-      const content = extractAssistantText(payload.choices?.[0]?.message?.content);
+      const choice = payload.choices?.[0];
+      const content = extractAssistantText(
+        choice?.message?.content
+        ?? choice?.message?.reasoning
+        ?? choice?.text
+        ?? payload,
+      );
 
       if (!content) {
-        throw new Error(`OpenRouter response for ${model} did not include assistant text`);
+        throw new Error(
+          `OpenRouter response for ${model} did not include assistant text. payload=${summarizePayload(payload)}`,
+        );
       }
+
+      const completedAt = new Date().toISOString();
+      const successAttempt: OpenRouterAttempt = {
+        model,
+        status: 'success',
+        startedAt,
+        completedAt,
+        content,
+        raw: payload,
+      };
+      attempts.push(successAttempt);
+      options?.onAttempt?.(successAttempt);
 
       return {
         attemptedModels,
+        attempts,
         content,
         model,
         raw: payload,
       };
     } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
+      clearTimeout(timeoutId);
+      const message = error instanceof Error ? error.message : String(error);
+      modelErrors.push(`${model}: ${message}`);
+      const completedAt = new Date().toISOString();
+      const failedAttempt: OpenRouterAttempt = {
+        model,
+        status: 'error',
+        startedAt,
+        completedAt,
+        error: message,
+      };
+      attempts.push(failedAttempt);
+      options?.onAttempt?.(failedAttempt);
     }
   }
 
   const attempted = attemptedModels.join(', ');
   throw new Error(
-    `OpenRouter failed for all configured models (${attempted}). ${lastError?.message ?? 'Unknown error'}`,
+    `OpenRouter failed for all configured models (${attempted}). ${modelErrors.join(' | ') || 'Unknown error'}`,
   );
 }
