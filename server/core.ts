@@ -11,6 +11,7 @@ import {
   generateChecklistAnalysis,
   generateDashboardChatReply,
   generateDraftReplyStage,
+  getArticleTracePlan,
   generateIssuesAnalysis,
   generateLawCandidatesAnalysis,
   parseToolPayload,
@@ -19,6 +20,11 @@ import {
   skipPendingStages,
   startStage,
 } from "./workflow/index.ts";
+
+function isAllConfiguredModelsFailed(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /OpenRouter failed for all configured models/i.test(message);
+}
 
 export async function executeCaseWorkflow(
   args: FullCaseWorkflowArgs,
@@ -134,15 +140,18 @@ export async function executeCaseWorkflow(
 
         const lawCandidates = Array.isArray(lawResult.payload.law_candidates) ? lawResult.payload.law_candidates : [];
         const firstLaw = lawCandidates.find((candidate) => Boolean(asNonEmptyString(asObject(candidate)?.law_title)));
-        const firstLawTitle = asNonEmptyString(asObject(firstLaw)?.law_title)
-          || "風俗営業等の規制及び業務の適正化等に関する法律";
+        const articleTracePlan = getArticleTracePlan(
+          asNonEmptyString(asObject(firstLaw)?.law_title),
+          args.domain_hint,
+          args.request_text,
+        );
 
         const articleTraceResult = parseToolPayload(await client.callTool({
           name: "trace_articles_and_references",
           arguments: {
             case_id: args.case_id,
-            law_id: firstLawTitle,
-            entry_points: ["第2条", "第33条"],
+            law_id: articleTracePlan.lawTitle,
+            entry_points: articleTracePlan.entryPoints,
             max_depth: 2,
             include_delegations: true,
             include_related_rules: true,
@@ -171,6 +180,20 @@ export async function executeCaseWorkflow(
           timeout_like: isTimeoutLikeError(error),
           fallback_mode: "deterministic_fallback",
         });
+
+        if (isAllConfiguredModelsFailed(error)) {
+          skipPendingStages(timeline, "予備モデルを含む全モデルで応答取得に失敗したため、解析を中断しました。");
+          const failureTrace = buildWorkflowTrace(timeline, sections, "openrouter_stage_chain", llmError);
+          const failure = Object.assign(
+            new Error("設定済みモデルとフォールバックモデルの応答取得に失敗したため、解析を完了できませんでした。"),
+            {
+              timeline: timeline.map((entry) => ({ ...entry })),
+              trace: failureTrace,
+            },
+          );
+          throw failure;
+        }
+
         skipPendingStages(timeline, "LLM 連鎖を最後まで完走できなかったため、補助ロジックへ切り替えました。");
         emitProgress("主解析が途切れたため、補助ロジックへ切り替えています。");
 

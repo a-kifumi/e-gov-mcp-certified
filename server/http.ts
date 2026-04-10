@@ -203,6 +203,11 @@ export async function startServer() {
       });
       res.end();
     } catch (error) {
+      const structuredError = error as Error & {
+        timeline?: unknown;
+        trace?: unknown;
+      };
+
       logServerError("api.analyze_stream", error, {
         body: truncateForLog(req.body),
         timeout_like: isTimeoutLikeError(error),
@@ -212,7 +217,8 @@ export async function startServer() {
         writeJsonLine(res, {
           type: "error",
           message: "解析ストリームの実行中にエラーが発生しました。",
-          timeline: [],
+          timeline: Array.isArray(structuredError.timeline) ? structuredError.timeline : [],
+          trace: structuredError.trace,
           error: error instanceof Error ? error.message : String(error),
         });
         res.end();

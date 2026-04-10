@@ -102,6 +102,7 @@ export type CaseData = {
 };
 
 export type ProgressState = {
+  status?: 'running' | 'error';
   message: string;
   timeline: StageTrace[];
   trace: AnalysisTrace | null;

@@ -8,6 +8,8 @@ import {
   FOOD_SANITATION_LAW_SOURCE,
   FUEI_LAW_SOURCE,
   generateDraftInitialReplyPayload,
+  getArticleTracePlan,
+  resolveConsultationDomain,
 } from "./workflow/index.ts";
 
 type ExecuteCaseWorkflow = (
@@ -139,12 +141,37 @@ function createMcpServer(executeCaseWorkflow: ExecuteCaseWorkflow) {
       jurisdiction: z.string().optional(),
       output_language: z.string().default("ja"),
     },
-    async (args) => ({
-      content: [{
-        type: "text",
-        text: JSON.stringify({
+    async (args) => {
+      const resolvedDomain = resolveConsultationDomain(args.request_text, args.domain_hint);
+      const meta = {
+        needs_human_review: true,
+        generated_at: new Date().toISOString(),
+        server_version: "0.1.0",
+        sources: [],
+      };
+
+      const payload = resolvedDomain === "construction"
+        ? {
           case_id: args.case_id,
-          domain_detected: args.domain_hint || "fuei",
+          domain_detected: resolvedDomain,
+          issues: [
+            { issue_code: "construction_license_scope", label: "建設業許可の要否", confidence: 0.95, reason: "請負予定金額や工事区分によって許可要否が分かれるため" },
+            { issue_code: "construction_staffing", label: "技術者・実務経験要件の確認", confidence: 0.87, reason: "資格や実務経験の裏付けで申請方針が変わるため" },
+            { issue_code: "construction_business_setup", label: "営業所体制と財産要件の確認", confidence: 0.82, reason: "法人成りや営業所設置の状況で必要資料が変わるため" },
+          ],
+          missing_facts: ["請け負う予定工事の種類", "1件あたりの請負予定金額", "営業所所在地", "資格・実務経験の裏付け資料", "役員・技術者候補の常勤体制"],
+          hearing_questions: [
+            "請け負う予定の工事は主にどの業種で、1件あたりの請負金額はいくらを想定していますか？",
+            "国家資格の有無に加えて、実務経験を裏付ける資料はどこまで用意できますか？",
+            "法人成り後の営業所所在地と、常勤で配置できる役員・技術者候補は固まっていますか？",
+          ],
+          warnings: ["許可要件の最終判断には、工事区分・金額・人的体制の確認が必要です"],
+          meta,
+        }
+        : resolvedDomain === "fuei"
+          ? {
+          case_id: args.case_id,
+          domain_detected: resolvedDomain,
           issues: [
             { issue_code: "food_business_permission", label: "飲食店営業許可", confidence: 0.88, reason: "飲食提供を伴う店舗営業のため" },
             { issue_code: "late_night_liquor", label: "深夜酒類提供の要否", confidence: 0.93, reason: "深夜営業・酒類提供あり" },
@@ -153,15 +180,27 @@ function createMcpServer(executeCaseWorkflow: ExecuteCaseWorkflow) {
           missing_facts: ["客席配置", "従業員の接客態様", "カラオケ有無", "店内面積", "物件用途"],
           hearing_questions: ["従業員が客の隣に座る運営は予定していますか？", "カウンター越し以外の接客はありますか？", "客席図面はありますか？"],
           warnings: ["法令本文だけでは自治体・警察運用を確定できません"],
-          meta: {
-            needs_human_review: true,
-            generated_at: new Date().toISOString(),
-            server_version: "0.1.0",
-            sources: [],
-          },
-        }, null, 2),
-      }],
-    }),
+          meta,
+        }
+          : {
+            case_id: args.case_id,
+            domain_detected: resolvedDomain,
+            issues: [
+              { issue_code: "general_scope", label: "主要な許認可・手続の特定", confidence: 0.72, reason: "相談文だけでは対象法分野の確定に追加確認が必要なため" },
+            ],
+            missing_facts: ["事業内容の詳細", "対象となる商品・サービス", "営業形態", "所在地", "開始予定時期"],
+            hearing_questions: ["予定している事業内容を、提供する商品やサービスが分かる形で具体的に教えてください。"],
+            warnings: ["補助ロジックでは分野特定が不十分なため、追加確認後に再解析してください"],
+            meta,
+          };
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(payload, null, 2),
+        }],
+      };
+    },
   );
 
   mcp.tool(
@@ -177,6 +216,70 @@ function createMcpServer(executeCaseWorkflow: ExecuteCaseWorkflow) {
       const checkedOn = args.as_of_date || new Date().toISOString().split("T")[0];
       const searchText = [...(args.issues ?? []), ...(args.keywords ?? [])].join(" ");
       const needsSuccessionReference = /(承継|譲渡|相続|合併|分割|居抜き)/.test(searchText);
+      const resolvedDomain = resolveConsultationDomain(searchText);
+
+      if (resolvedDomain === "construction") {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              case_id: args.case_id,
+              law_candidates: [
+                {
+                  law_title: "建設業法",
+                  relevance_score: 0.97,
+                  matched_terms: ["建設業許可", "工事請負", "実務経験"],
+                  why_relevant: "建設業許可の要否、業種区分、人的要件や財産要件の確認に関連",
+                  references: [],
+                  source: { provider: "e-Gov 法令検索", title: "建設業法", checked_on: checkedOn },
+                },
+              ],
+              related_rules: [{ parent_law_title: "建設業法", related_rule_hint: "施行令・施行規則と許可行政庁の案内を確認" }],
+              warnings: ["候補法令は初期整理用です。具体的な業種区分・請負金額・人的体制に応じて条文と運用を確認してください"],
+              meta: {
+                needs_human_review: true,
+                generated_at: new Date().toISOString(),
+                server_version: "0.1.0",
+                sources: [{ provider: "e-Gov 法令検索", title: "建設業法", checked_on: checkedOn }],
+              },
+            }, null, 2),
+          }],
+        };
+      }
+
+      if (resolvedDomain !== "fuei") {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              case_id: args.case_id,
+              law_candidates: resolvedDomain === "general"
+                ? []
+                : [{
+                  law_title:
+                    resolvedDomain === "immigration"
+                      ? "出入国管理及び難民認定法"
+                      : resolvedDomain === "waste"
+                        ? "廃棄物の処理及び清掃に関する法律"
+                        : "関連法令の個別確認が必要",
+                  relevance_score: 0.8,
+                  matched_terms: args.issues ?? [],
+                  why_relevant: "相談分野に対応する主要法令の候補",
+                  references: [],
+                  source: { provider: "e-Gov 法令検索", title: resolvedDomain === "immigration" ? "出入国管理及び難民認定法" : resolvedDomain === "waste" ? "廃棄物の処理及び清掃に関する法律" : "関連法令" },
+                }],
+              related_rules: [],
+              warnings: ["補助ロジックでは候補法令を絞り切れていません。主解析または人間レビューで確認してください"],
+              meta: {
+                needs_human_review: true,
+                generated_at: new Date().toISOString(),
+                server_version: "0.1.0",
+                sources: [],
+              },
+            }, null, 2),
+          }],
+        };
+      }
 
       return {
         content: [{
@@ -261,10 +364,13 @@ function createMcpServer(executeCaseWorkflow: ExecuteCaseWorkflow) {
       include_delegations: z.boolean().default(true),
       include_related_rules: z.boolean().default(true),
     },
-    async (args) => ({
-      content: [{
-        type: "text",
-        text: JSON.stringify({
+    async (args) => {
+      const articleTracePlan = getArticleTracePlan(args.law_id, "auto", args.law_id);
+      const isFuei = articleTracePlan.lawTitle === FUEI_LAW_SOURCE.title;
+      const isFood = articleTracePlan.lawTitle === FOOD_SANITATION_LAW_SOURCE.title;
+
+      const payload = isFuei
+        ? {
           case_id: args.case_id,
           law_id: args.law_id,
           entry_points: args.entry_points,
@@ -290,9 +396,57 @@ function createMcpServer(executeCaseWorkflow: ExecuteCaseWorkflow) {
             server_version: "0.1.0",
             sources: [{ provider: "e-Gov Law API v2", retrieved_at: new Date().toISOString() }],
           },
-        }, null, 2),
-      }],
-    }),
+        }
+        : isFood
+          ? {
+            case_id: args.case_id,
+            law_id: args.law_id,
+            entry_points: args.entry_points,
+            article_graph: [
+              {
+                citation: "第54条",
+                summary_for_practice: "施設基準を都道府県条例に委ねる条文の確認起点。",
+                references: [{ reference_type: "internal_reference", target_citation: "第55条" }],
+                delegations: [],
+              },
+              {
+                citation: "第55条",
+                summary_for_practice: "営業許可と施設基準適合の確認起点。",
+                references: [],
+                delegations: [],
+              },
+            ],
+            practical_next_reads: ["都道府県条例の施設基準", "営業承継がある場合の関連条文"],
+            warnings: ["条文追跡は法令本文ベースであり、自治体運用は別確認が必要です"],
+            meta: {
+              needs_human_review: true,
+              generated_at: new Date().toISOString(),
+              server_version: "0.1.0",
+              sources: [{ provider: "e-Gov Law API v2", retrieved_at: new Date().toISOString() }],
+            },
+          }
+          : {
+            case_id: args.case_id,
+            law_id: args.law_id,
+            entry_points: args.entry_points,
+            article_graph: [],
+            practical_next_reads: ["e-Gov で許可要件の条文を確認", "施行令・施行規則と所管庁の案内を確認"],
+            warnings: ["この補助トレースは一般的な確認観点のみです。具体的な条文番号は個別に確認してください"],
+            meta: {
+              needs_human_review: true,
+              generated_at: new Date().toISOString(),
+              server_version: "0.1.0",
+              sources: [{ provider: "e-Gov Law API v2", retrieved_at: new Date().toISOString() }],
+            },
+          };
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(payload, null, 2),
+        }],
+      };
+    },
   );
 
   mcp.tool(
@@ -303,10 +457,41 @@ function createMcpServer(executeCaseWorkflow: ExecuteCaseWorkflow) {
       law_candidates: z.array(z.record(z.string(), z.any())),
       client_facts_known: z.array(z.string()).optional(),
     },
-    async (args) => ({
-      content: [{
-        type: "text",
-        text: JSON.stringify({
+    async (args) => {
+      const resolvedDomain = resolveConsultationDomain([...(args.issues ?? []), ...(args.client_facts_known ?? [])].join("\n"));
+      const payload = resolvedDomain === "construction"
+        ? {
+          case_id: args.case_id,
+          checklist: [
+            {
+              priority: "high",
+              item: "工事内容と業種区分",
+              why_needed: "どの建設業許可が必要か、または許可不要範囲かを切り分けるため",
+              question_to_client: "請け負う予定の工事内容を具体的に教えてください。複数ある場合は主な工事を挙げてください。",
+            },
+            {
+              priority: "high",
+              item: "請負金額の見込み",
+              why_needed: "1件ごとの請負金額によって許可要否の判断が変わるため",
+              question_to_client: "1件あたりの請負金額は、税込でどの程度を想定していますか？",
+            },
+            {
+              priority: "high",
+              item: "資格・実務経験の裏付け資料",
+              why_needed: "人的要件の整理には資格証や実務経験証明の可否が重要なため",
+              question_to_client: "資格証、実務経験を示す契約書や請求書など、手元にある資料を教えてください。",
+            },
+          ],
+          summary: "現時点では許可要否と人的要件の確認に必要な事実が不足しています",
+          meta: {
+            needs_human_review: true,
+            generated_at: new Date().toISOString(),
+            server_version: "0.1.0",
+            sources: [],
+          },
+        }
+        : resolvedDomain === "fuei"
+          ? {
           case_id: args.case_id,
           checklist: [
             {
@@ -335,9 +520,33 @@ function createMcpServer(executeCaseWorkflow: ExecuteCaseWorkflow) {
             server_version: "0.1.0",
             sources: [],
           },
-        }, null, 2),
-      }],
-    }),
+        }
+          : {
+            case_id: args.case_id,
+            checklist: [
+              {
+                priority: "high",
+                item: "事業内容の具体化",
+                why_needed: "対象法分野と必要手続を絞り込むため",
+                question_to_client: "予定している事業内容、提供物、想定顧客、営業方法を具体的に教えてください。",
+              },
+            ],
+            summary: "現時点では対象法分野の切り分けに必要な情報が不足しています",
+            meta: {
+              needs_human_review: true,
+              generated_at: new Date().toISOString(),
+              server_version: "0.1.0",
+              sources: [],
+            },
+          };
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(payload, null, 2),
+        }],
+      };
+    },
   );
 
   mcp.tool(

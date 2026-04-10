@@ -1,6 +1,6 @@
-![e-Gov Intake Dashboard サンプル画面](assets/img/example_e-gov.jpeg)
+![事案整理くん サンプル画面](assets/img/example_e-gov.jpeg)
 
-# e-gov Intake Dashboard
+# 事案整理くん
 
 士業における初回相談について、**論点整理・関連法令の洗い出し・確認事項の列挙・初回返信案の下書き** までを一気にまとめるためのローカルアプリです。
 

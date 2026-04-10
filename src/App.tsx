@@ -10,12 +10,26 @@ export default function App() {
   const [stage, setStage] = useState<'intake' | 'analyzing' | 'dashboard'>('intake');
   const [clientName, setClientName] = useState('');
   const [consultationText, setConsultationText] = useState('');
+  const [originalConsultationText, setOriginalConsultationText] = useState('');
   const [caseData, setCaseData] = useState<CaseData | null>(null);
   const [brushUpText, setBrushUpText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const [progressState, setProgressState] = useState<ProgressState | null>(null);
   const [isChatSubmitting, setIsChatSubmitting] = useState(false);
+
+  const resetToHome = () => {
+    setCaseData(null);
+    setConsultationText('');
+    setOriginalConsultationText('');
+    setClientName('');
+    setBrushUpText('');
+    setError(null);
+    setIsChatSubmitting(false);
+    setHistory([]);
+    setProgressState(null);
+    setStage('intake');
+  };
 
   const runAnalysis = async ({
     requestText,
@@ -32,6 +46,7 @@ export default function App() {
     setError(null);
     setStage('analyzing');
     setProgressState({
+      status: 'running',
       message: '解析の準備をしています。',
       timeline: buildPlaceholderTimeline(),
       trace: null,
@@ -39,6 +54,8 @@ export default function App() {
 
     try {
       let finalWorkflow: WorkflowEvent['workflow'] | undefined;
+      let latestTimeline = buildPlaceholderTimeline();
+      let latestTrace: ProgressState['trace'] = null;
 
       await streamCaseWorkflow(
         {
@@ -50,15 +67,21 @@ export default function App() {
           output_language: 'ja',
         },
         (event) => {
+          const nextTimeline = event.timeline.length > 0 ? event.timeline : buildPlaceholderTimeline();
+          const nextTrace = event.trace || null;
+
+          setProgressState({
+            status: 'running',
+            message: localizeUiMessage(event.message),
+            timeline: nextTimeline,
+            trace: nextTrace,
+          });
+          latestTimeline = nextTimeline;
+          latestTrace = nextTrace;
+
           if (event.type === 'error') {
             throw new Error(localizeUiMessage(event.error || event.message));
           }
-
-      setProgressState({
-            message: localizeUiMessage(event.message),
-            timeline: event.timeline.length > 0 ? event.timeline : buildPlaceholderTimeline(),
-            trace: event.trace || null,
-          });
 
           if (event.type === 'complete' && event.workflow) {
             finalWorkflow = event.workflow;
@@ -87,14 +110,29 @@ export default function App() {
 
       setStage('dashboard');
     } catch (err) {
+      const message = localizeUiMessage(err instanceof Error ? err.message : String(err));
+      const shouldShowAnalysisFailure = /設定済みモデルの応答取得に失敗しました|フォールバックモデルの応答取得に失敗しました|解析を完了できませんでした/.test(message);
+
+      if (shouldShowAnalysisFailure) {
+        setProgressState({
+          status: 'error',
+          message,
+          timeline: latestTimeline,
+          trace: latestTrace,
+        });
+        setStage('analyzing');
+        return;
+      }
+
       setProgressState(null);
-      setError(localizeUiMessage(err instanceof Error ? err.message : String(err)));
+      setError(message);
       setStage(fallbackStage || 'intake');
     }
   };
 
   const handleStartAnalysis = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    setOriginalConsultationText(consultationText);
     await runAnalysis({
       requestText: consultationText,
       resetHistory: true,
@@ -187,6 +225,7 @@ export default function App() {
         {stage === 'analyzing' && (
           <AnalyzingView
             progressState={progressState}
+            onReset={resetToHome}
           />
         )}
 
@@ -194,17 +233,8 @@ export default function App() {
           <DashboardView
             caseData={caseData}
             clientName={clientName}
-            onReset={() => {
-              setCaseData(null);
-              setConsultationText('');
-              setClientName('');
-              setBrushUpText('');
-              setError(null);
-              setIsChatSubmitting(false);
-              setHistory([]);
-              setProgressState(null);
-              setStage('intake');
-            }}
+            originalConsultationText={originalConsultationText}
+            onReset={resetToHome}
             brushUpText={brushUpText}
             setBrushUpText={setBrushUpText}
             history={history}

@@ -48,6 +48,8 @@ export const FOOD_SANITATION_LAW_SOURCE = {
   source_url: "https://laws.e-gov.go.jp/law/322AC0000000233/20250601_504AC0000000068",
 } as const;
 
+export type ResolvedDomain = "construction" | "kobutsu" | "fuei" | "immigration" | "waste" | "corporate" | "general";
+
 const LAW_SOURCE_CATALOG = [
   FUEI_LAW_SOURCE,
   FOOD_SANITATION_LAW_SOURCE,
@@ -61,6 +63,88 @@ const LAW_SOURCE_CATALOG = [
 const WORKFLOW_STAGE_ORDER: WorkflowStageKey[] = ["issues", "lawCandidates", "checklist", "draftReply"];
 
 const JAPANESE_TEXT_PATTERN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+
+function normalizeLawTitle(title: string): string {
+  return title.replace(/\s+/g, "");
+}
+
+export function resolveConsultationDomain(
+  requestText: string,
+  domainHint?: FullCaseWorkflowArgs["domain_hint"],
+  supplementalTexts: string[] = [],
+): ResolvedDomain {
+  if (domainHint && domainHint !== "auto") {
+    return domainHint;
+  }
+
+  const combined = [requestText, ...supplementalTexts].join("\n");
+
+  if (/(工務店|建設業|建築工事|内装工事|リフォーム|大工|施工|請負|元請|下請|主任技術者|実務経験|法人成り)/.test(combined)) {
+    return "construction";
+  }
+  if (/(古物|中古品|リユース|買取|転売|オークション|古物商)/.test(combined)) {
+    return "kobutsu";
+  }
+  if (/(バー|スナック|ラウンジ|接待|深夜営業|酒類|カラオケ|飲食店)/.test(combined)) {
+    return "fuei";
+  }
+  if (/(在留資格|ビザ|入管|外国人採用|就労資格|留学生|特定技能|技術・人文知識・国際業務)/.test(combined)) {
+    return "immigration";
+  }
+  if (/(産業廃棄物|一般廃棄物|収集運搬|廃棄物|処分業)/.test(combined)) {
+    return "waste";
+  }
+  if (/(会社設立|定款|株式|取締役|合同会社|株式会社|法人化)/.test(combined)) {
+    return "corporate";
+  }
+
+  return "general";
+}
+
+export function getArticleTracePlan(lawTitle?: string, domainHint?: FullCaseWorkflowArgs["domain_hint"], requestText?: string) {
+  const normalizedTitle = normalizeLawTitle(lawTitle || "");
+  const resolvedDomain = resolveConsultationDomain(requestText || "", domainHint, lawTitle ? [lawTitle] : []);
+
+  if (normalizedTitle === normalizeLawTitle(FUEI_LAW_SOURCE.title) || resolvedDomain === "fuei") {
+    return {
+      lawTitle: FUEI_LAW_SOURCE.title,
+      entryPoints: ["第2条", "第33条"],
+    };
+  }
+
+  if (normalizedTitle === normalizeLawTitle(FOOD_SANITATION_LAW_SOURCE.title)) {
+    return {
+      lawTitle: FOOD_SANITATION_LAW_SOURCE.title,
+      entryPoints: ["第54条", "第55条"],
+    };
+  }
+
+  if (normalizedTitle === normalizeLawTitle("建設業法") || resolvedDomain === "construction") {
+    return {
+      lawTitle: "建設業法",
+      entryPoints: [],
+    };
+  }
+
+  if (normalizedTitle === normalizeLawTitle("出入国管理及び難民認定法") || resolvedDomain === "immigration") {
+    return {
+      lawTitle: "出入国管理及び難民認定法",
+      entryPoints: [],
+    };
+  }
+
+  if (normalizedTitle === normalizeLawTitle("廃棄物の処理及び清掃に関する法律") || resolvedDomain === "waste") {
+    return {
+      lawTitle: "廃棄物の処理及び清掃に関する法律",
+      entryPoints: [],
+    };
+  }
+
+  return {
+    lawTitle: lawTitle || "関連法令",
+    entryPoints: [],
+  };
+}
 
 const REVIEW_NOTE_TRANSLATIONS: Array<{ pattern: RegExp; replacement: string }> = [
   {
@@ -225,7 +309,7 @@ function buildDraftInitialReplyPrompt(args: DraftInitialReplyArgs) {
     {
       role: "system" as const,
       content:
-        "あなたは法律相談の一次受付向けに、安全な日本語の返信案を作る。出力は JSON のみで、キーは subject, body, disclaimer_flags, review_notes に限定すること。subject と body と review_notes は必ず自然な日本語で書き、英語の文や英語の箇条書きを混ぜないこと。disclaimer_flags のみ英字スネークケースの識別子でよい。review_notes は担当者向けの内部レビュー注意として、日本語の短い文を 2 件以上返すこと。法的結論や自治体運用を断定してはならない。",
+        "あなたは法律相談の一次受付向けに、安全な日本語の返信案を作る。出力は JSON のみで、キーは subject, body, disclaimer_flags, review_notes に限定すること。subject と body と review_notes は必ず自然な日本語で書き、英語の文や英語の箇条書きを混ぜないこと。disclaimer_flags のみ英字スネークケースの識別子でよい。review_notes は担当者向けの内部レビュー注意として、日本語の短い文を 2 件以上返すこと。法的結論や自治体運用を断定してはならない。与えられた issues・law_candidates・checklist にない論点を新たに足してはならない。",
     },
     {
       role: "user" as const,
@@ -277,10 +361,6 @@ function mergeAiDraftIntoTemplate(
       attempted_models: attemptedModels,
     },
   };
-}
-
-function normalizeLawTitle(title: string): string {
-  return title.replace(/\s+/g, "");
 }
 
 function resolveLawSource(candidate: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -756,10 +836,12 @@ export function buildWorkflowTrace(
 }
 
 function buildIssuesAnalysisPrompt(args: FullCaseWorkflowArgs) {
+  const resolvedDomain = resolveConsultationDomain(args.request_text, args.domain_hint);
+
   return [
     {
       role: "system" as const,
-      content: "You are a careful Japanese legal-intake triage assistant. Return JSON only. Extract issues and missing facts from the consultation memo. Do not give final legal conclusions.",
+      content: "You are a careful Japanese legal-intake triage assistant. Return JSON only. Extract issues and missing facts from the consultation memo. Do not give final legal conclusions. Stay strictly within the actual consultation domain. Never introduce unrelated domains such as food service or nightlife regulation unless the memo itself clearly mentions them.",
     },
     {
       role: "user" as const,
@@ -769,6 +851,7 @@ function buildIssuesAnalysisPrompt(args: FullCaseWorkflowArgs) {
         client_name: args.client_name ?? null,
         request_text: args.request_text,
         domain_hint: args.domain_hint ?? "auto",
+        resolved_domain: resolvedDomain,
         jurisdiction: args.jurisdiction ?? null,
         output_language: args.output_language,
         output_contract: {
@@ -783,10 +866,16 @@ function buildIssuesAnalysisPrompt(args: FullCaseWorkflowArgs) {
 }
 
 function buildLawAnalysisPrompt(args: FullCaseWorkflowArgs, issuesPayload: ToolPayload) {
+  const resolvedDomain = resolveConsultationDomain(
+    args.request_text,
+    args.domain_hint,
+    getIssueLabelsFromPayload(issuesPayload),
+  );
+
   return [
     {
       role: "system" as const,
-      content: "You are a careful Japanese legal-intake triage assistant. Return JSON only. Select plausible law candidates based on the supplied issues and consultation text. Keep citations cautious.",
+      content: "You are a careful Japanese legal-intake triage assistant. Return JSON only. Select plausible law candidates based on the supplied issues and consultation text. Keep citations cautious. Do not switch to an unrelated regulatory field. If the case is about construction, do not introduce food-service or nightlife laws unless explicitly supported by the memo.",
     },
     {
       role: "user" as const,
@@ -794,6 +883,7 @@ function buildLawAnalysisPrompt(args: FullCaseWorkflowArgs, issuesPayload: ToolP
         task: "Identify relevant Japanese laws for the extracted issues",
         case_id: args.case_id,
         request_text: args.request_text,
+        resolved_domain: resolvedDomain,
         extracted_issues: issuesPayload,
         known_law_catalog: LAW_SOURCE_CATALOG.map((entry) => ({
           title: entry.title,
@@ -810,10 +900,19 @@ function buildLawAnalysisPrompt(args: FullCaseWorkflowArgs, issuesPayload: ToolP
 }
 
 function buildChecklistAnalysisPrompt(args: FullCaseWorkflowArgs, issuesPayload: ToolPayload, lawPayload: ToolPayload) {
+  const resolvedDomain = resolveConsultationDomain(
+    args.request_text,
+    args.domain_hint,
+    [
+      ...getIssueLabelsFromPayload(issuesPayload),
+      ...getLawTitlesFromPayload(lawPayload),
+    ],
+  );
+
   return [
     {
       role: "system" as const,
-      content: "あなたは日本の法律相談の一次受付を補助するアシスタントだ。出力は JSON のみで返すこと。checklist の item, why_needed, question_to_client, および summary は必ず自然な日本語で書き、英語を混ぜないこと。安全に次の判断へ進むための不足情報を、日本語の確認事項として簡潔に整理すること。",
+      content: "あなたは日本の法律相談の一次受付を補助するアシスタントだ。出力は JSON のみで返すこと。checklist の item, why_needed, question_to_client, および summary は必ず自然な日本語で書き、英語を混ぜないこと。安全に次の判断へ進むための不足情報を、日本語の確認事項として簡潔に整理すること。相談文にない業態の確認事項を混ぜてはならない。",
     },
     {
       role: "user" as const,
@@ -821,6 +920,7 @@ function buildChecklistAnalysisPrompt(args: FullCaseWorkflowArgs, issuesPayload:
         task: "法律相談の一次受付に必要な確認事項を日本語で作成する",
         case_id: args.case_id,
         request_text: args.request_text,
+        resolved_domain: resolvedDomain,
         extracted_issues: issuesPayload,
         related_laws: lawPayload,
         language_requirements: {
@@ -936,7 +1036,16 @@ export async function runDeterministicWorkflow(
   client: Client,
   args: FullCaseWorkflowArgs,
   options?: { allowLlmDraft?: boolean; onDraftAttempt?: (attempt: OpenRouterAttempt) => void },
-) {
+): Promise<{
+  case_id: string;
+  outputs: {
+    issues: ToolPayload;
+    related_laws: ToolPayload;
+    article_trace: ToolPayload;
+    missing_information: ToolPayload;
+    draft_reply: ToolPayload;
+  };
+}> {
   const issuesResult = parseToolPayload(await client.callTool({
     name: "extract_issues_from_consultation",
     arguments: {
@@ -980,18 +1089,23 @@ export async function runDeterministicWorkflow(
     ))
     : null;
 
+  const articleTracePlan = getArticleTracePlan(
+    primaryLawId &&
+      typeof primaryLawId === "object" &&
+      "law_title" in primaryLawId &&
+      typeof (primaryLawId as { law_title?: unknown }).law_title === "string"
+      ? (primaryLawId as { law_title: string }).law_title
+      : undefined,
+    args.domain_hint,
+    args.request_text,
+  );
+
   const articleTraceResult = parseToolPayload(await client.callTool({
     name: "trace_articles_and_references",
     arguments: {
       case_id: args.case_id,
-      law_id:
-        primaryLawId &&
-        typeof primaryLawId === "object" &&
-        "law_title" in primaryLawId &&
-        typeof (primaryLawId as { law_title?: unknown }).law_title === "string"
-          ? (primaryLawId as { law_title: string }).law_title
-          : "風俗営業等の規制及び業務の適正化等に関する法律",
-      entry_points: ["第2条", "第33条"],
+      law_id: articleTracePlan.lawTitle,
+      entry_points: articleTracePlan.entryPoints,
       max_depth: 2,
       include_delegations: true,
       include_related_rules: true,

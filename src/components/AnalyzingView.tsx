@@ -1,17 +1,19 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Bot, Sparkles } from 'lucide-react';
+import { Bot, Home, Sparkles, TriangleAlert } from 'lucide-react';
 import type { ProgressState, SectionKey } from '../types';
 import { buildPlaceholderTimeline, getProgressRatio, getRunningStageLabel, getAttemptStatusMeta, localizeUiMessage, formatModelLabel } from '../utils';
 import TraceDetailModal from './TraceDetailModal.tsx';
 
 interface AnalyzingViewProps {
   progressState: ProgressState | null;
+  onReset: () => void;
 }
 
-export default function AnalyzingView({ progressState }: AnalyzingViewProps) {
+export default function AnalyzingView({ progressState, onReset }: AnalyzingViewProps) {
   const timeline = progressState?.timeline?.length ? progressState.timeline : buildPlaceholderTimeline();
   const analysisTrace = progressState?.trace || null;
+  const isFailure = progressState?.status === 'error';
   const progressRatio = getProgressRatio(timeline);
   const runningStage = getRunningStageLabel(timeline);
   const finishedCount = timeline.filter((entry) => ['success', 'error', 'skipped'].includes(entry.status)).length;
@@ -30,24 +32,32 @@ export default function AnalyzingView({ progressState }: AnalyzingViewProps) {
           <div className="absolute inset-x-0 top-0 h-1.5 bg-gradient-to-r from-black via-stone-500 to-white opacity-70" />
           <div>
             <div className="inline-flex items-center gap-2 rounded-full border border-stone-300 bg-white/70 px-4 py-2 text-xs font-bold uppercase tracking-[0.25em] text-stone-500">
-              <Sparkles className="w-4 h-4" />
-              進行中
+              {isFailure ? <TriangleAlert className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
+              {isFailure ? '失敗' : '進行中'}
             </div>
-            <h2 className="mt-6 text-4xl md:text-5xl tracking-tight">事案を解析しています</h2>
+            <h2 className="mt-6 text-4xl md:text-5xl tracking-tight">{isFailure ? '解析に失敗しました' : '事案を解析しています'}</h2>
             <p className="mt-4 text-lg font-medium leading-relaxed text-stone-500">
-              gemma を主系にして、論点整理から返信文まで4段階で順番に進めています。待ち時間のあいだも、いま何を組み立てているか追えるようにしています。
+              {isFailure
+                ? '設定済みのフォールバックモデルまで含めて応答を取得できませんでした。時間を置いて再度試すか、home に戻って最初からやり直してください。'
+                : 'gemma を主系にして、論点整理から返信文まで4段階で順番に進めています。待ち時間のあいだも、いま何を組み立てているか追えるようにしています。'}
             </p>
           </div>
 
           <div className="my-10 flex items-center justify-center">
-            <motion.div
-              animate={{ rotate: 360 }}
-              transition={{ duration: 3, ease: 'linear', repeat: Infinity }}
-              className="relative h-32 w-32 rounded-full border-[14px] border-stone-200 border-t-black"
-            >
-              <div className="absolute inset-5 rounded-full border border-stone-300 bg-white/70" />
-              <div className="absolute inset-0 flex items-center justify-center text-2xl font-black">{progressRatio}%</div>
-            </motion.div>
+            {isFailure ? (
+              <div className="flex h-32 w-32 items-center justify-center rounded-full border-[14px] border-red-200 bg-red-50 text-red-700">
+                <TriangleAlert className="h-12 w-12" />
+              </div>
+            ) : (
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ duration: 3, ease: 'linear', repeat: Infinity }}
+                className="relative h-32 w-32 rounded-full border-[14px] border-stone-200 border-t-black"
+              >
+                <div className="absolute inset-5 rounded-full border border-stone-300 bg-white/70" />
+                <div className="absolute inset-0 flex items-center justify-center text-2xl font-black">{progressRatio}%</div>
+              </motion.div>
+            )}
           </div>
 
           <div>
@@ -69,6 +79,16 @@ export default function AnalyzingView({ progressState }: AnalyzingViewProps) {
             <p className="mt-4 text-sm font-semibold leading-relaxed text-stone-600">
               {progressState?.message || '解析の準備をしています。'}
             </p>
+            {isFailure && (
+              <button
+                type="button"
+                onClick={onReset}
+                className="mt-6 inline-flex items-center gap-2 rounded-full bg-black px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-stone-800"
+              >
+                <Home className="h-4 w-4" />
+                home に戻る
+              </button>
+            )}
           </div>
         </div>
 
@@ -76,10 +96,10 @@ export default function AnalyzingView({ progressState }: AnalyzingViewProps) {
           <div className="mb-6 flex items-center justify-between gap-4">
             <div>
               <p className="text-xs font-bold uppercase tracking-[0.25em] text-stone-400">解析トラック</p>
-              <h3 className="mt-2 text-2xl font-black">4段階進行</h3>
+              <h3 className="mt-2 text-2xl font-black">{isFailure ? '解析停止' : '4段階進行'}</h3>
             </div>
             <div className="rounded-full bg-white/70 px-4 py-2 text-sm font-bold text-stone-600">
-              ４段階で分析中
+              {isFailure ? '失敗内容を表示中' : '４段階で分析中'}
             </div>
           </div>
 

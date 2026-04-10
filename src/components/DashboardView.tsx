@@ -9,6 +9,7 @@ import SectionCard from './SectionCard';
 interface DashboardViewProps {
   caseData: CaseData;
   clientName: string;
+  originalConsultationText: string;
   onReset: () => void;
   brushUpText: string;
   setBrushUpText: (text: string) => void;
@@ -22,6 +23,7 @@ interface DashboardViewProps {
 export default function DashboardView({
   caseData,
   clientName,
+  originalConsultationText,
   onReset,
   brushUpText,
   setBrushUpText,
@@ -34,6 +36,7 @@ export default function DashboardView({
   const [checklistAnswers, setChecklistAnswers] = useState<Record<number, string>>({});
   const [isBrushUpInputFocused, setIsBrushUpInputFocused] = useState(false);
   const [draftCopied, setDraftCopied] = useState(false);
+  const usedFallback = Boolean(caseData.workflowSummary?.analysis_mode && caseData.workflowSummary.analysis_mode !== 'openrouter_stage_chain');
 
   const selectedChecklistEntries = caseData.checklist
     .map((item: ChecklistItem, index: number) => ({ index, item, answer: checklistAnswers[index] || '' }))
@@ -93,8 +96,14 @@ export default function DashboardView({
     >
       <div className="flex justify-between items-center mb-12">
         <div>
-          <h1 className="text-4xl md:text-5xl tracking-tight font-black mb-2">{clientName || 'お客様'}の事案</h1>
+          <h1 className="text-4xl md:text-5xl tracking-tight font-black mb-2">{clientName || 'お客様'} 様の事案</h1>
           <p className="text-stone-500 font-medium">事案ダッシュボード</p>
+          {usedFallback && (
+            <p className="mt-2 text-xs font-semibold text-amber-700">
+              この結果は主解析を最後まで採用できず、補助ロジックで補完した内容を含んでいます。
+              {caseData.workflowSummary?.llm_error ? ` 理由: ${localizeUiMessage(caseData.workflowSummary.llm_error)}` : ''}
+            </p>
+          )}
         </div>
         <button
           onClick={onReset}
@@ -106,6 +115,18 @@ export default function DashboardView({
       </div>
 
       <div className="swiss-grid">
+        <div className="col-span-12">
+          <SectionCard
+            icon={<FileText className="w-5 h-5" />}
+            title="元の相談内容"
+            detailLabel={originalConsultationText.trim() ? `${originalConsultationText.trim().length}文字` : '初回入力を表示'}
+          >
+            <div className="clay-inset rounded-[2rem] p-6 text-base font-medium leading-relaxed text-stone-700 whitespace-pre-wrap">
+              {originalConsultationText.trim() || '元の相談内容はまだありません。'}
+            </div>
+          </SectionCard>
+        </div>
+
         <div className="col-span-12 lg:col-span-4 space-y-8">
           <SectionCard
             icon={<FileText className="w-5 h-5" />}
@@ -298,7 +319,6 @@ export default function DashboardView({
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <div>
                     <p className="text-xs font-bold uppercase tracking-widest text-stone-400">かんたん回答</p>
-                    <p className="text-sm font-medium text-stone-600">不足情報はここで選ぶだけで送れるぜ。</p>
                   </div>
                   {selectedChecklistEntries.length > 0 && (
                     <button
