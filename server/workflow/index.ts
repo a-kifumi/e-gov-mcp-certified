@@ -48,16 +48,56 @@ export const FOOD_SANITATION_LAW_SOURCE = {
   source_url: "https://laws.e-gov.go.jp/law/322AC0000000233/20250601_504AC0000000068",
 } as const;
 
+export const CONSTRUCTION_BUSINESS_LAW_SOURCE = {
+  provider: "e-Gov 法令検索",
+  title: "建設業法",
+  law_id: "324AC0000000100",
+  law_number: "昭和二十四年法律第百号",
+  source_url: "https://laws.e-gov.go.jp/law/324AC0000000100",
+} as const;
+
+export const BUILDING_STANDARDS_LAW_SOURCE = {
+  provider: "e-Gov 法令検索",
+  title: "建築基準法",
+  law_id: "325AC0000000201",
+  law_number: "昭和二十五年法律第二百一号",
+  source_url: "https://laws.e-gov.go.jp/law/325AC0000000201",
+} as const;
+
+export const IMMIGRATION_CONTROL_LAW_SOURCE = {
+  provider: "e-Gov 法令検索",
+  title: "出入国管理及び難民認定法",
+  law_id: "326CO0000000319",
+  law_number: "昭和二十六年政令第三百十九号",
+  source_url: "https://laws.e-gov.go.jp/law/326CO0000000319",
+} as const;
+
+export const LABOR_STANDARDS_LAW_SOURCE = {
+  provider: "e-Gov 法令検索",
+  title: "労働基準法",
+  law_id: "322AC0000000049",
+  law_number: "昭和二十二年法律第四十九号",
+  source_url: "https://laws.e-gov.go.jp/law/322AC0000000049",
+} as const;
+
+export const WASTE_MANAGEMENT_LAW_SOURCE = {
+  provider: "e-Gov 法令検索",
+  title: "廃棄物の処理及び清掃に関する法律",
+  law_id: "345AC0000000137",
+  law_number: "昭和四十五年法律第百三十七号",
+  source_url: "https://laws.e-gov.go.jp/law/345AC0000000137",
+} as const;
+
 export type ResolvedDomain = "construction" | "kobutsu" | "fuei" | "immigration" | "waste" | "corporate" | "general";
 
 const LAW_SOURCE_CATALOG = [
   FUEI_LAW_SOURCE,
   FOOD_SANITATION_LAW_SOURCE,
-  { provider: "e-Gov 法令検索", title: "建設業法" },
-  { provider: "e-Gov 法令検索", title: "建築基準法" },
-  { provider: "e-Gov 法令検索", title: "出入国管理及び難民認定法" },
-  { provider: "e-Gov 法令検索", title: "労働基準法" },
-  { provider: "e-Gov 法令検索", title: "廃棄物の処理及び清掃に関する法律" },
+  CONSTRUCTION_BUSINESS_LAW_SOURCE,
+  BUILDING_STANDARDS_LAW_SOURCE,
+  IMMIGRATION_CONTROL_LAW_SOURCE,
+  LABOR_STANDARDS_LAW_SOURCE,
+  WASTE_MANAGEMENT_LAW_SOURCE,
 ] as const;
 
 const WORKFLOW_STAGE_ORDER: WorkflowStageKey[] = ["issues", "lawCandidates", "checklist", "draftReply"];

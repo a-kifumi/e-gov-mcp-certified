@@ -5,11 +5,14 @@ import { z } from "zod";
 import { getPublicOpenRouterConfig } from "../src/lib/ai/openrouter.ts";
 import type { FullCaseWorkflowArgs, ToolPayload, WorkflowExecutionHooks } from "./types.ts";
 import {
+  CONSTRUCTION_BUSINESS_LAW_SOURCE,
   FOOD_SANITATION_LAW_SOURCE,
   FUEI_LAW_SOURCE,
   generateDraftInitialReplyPayload,
   getArticleTracePlan,
+  IMMIGRATION_CONTROL_LAW_SOURCE,
   resolveConsultationDomain,
+  WASTE_MANAGEMENT_LAW_SOURCE,
 } from "./workflow/index.ts";
 
 type ExecuteCaseWorkflow = (
@@ -226,21 +229,22 @@ function createMcpServer(executeCaseWorkflow: ExecuteCaseWorkflow) {
               case_id: args.case_id,
               law_candidates: [
                 {
-                  law_title: "建設業法",
+                  law_id: CONSTRUCTION_BUSINESS_LAW_SOURCE.law_id,
+                  law_title: CONSTRUCTION_BUSINESS_LAW_SOURCE.title,
                   relevance_score: 0.97,
                   matched_terms: ["建設業許可", "工事請負", "実務経験"],
                   why_relevant: "建設業許可の要否、業種区分、人的要件や財産要件の確認に関連",
                   references: [],
-                  source: { provider: "e-Gov 法令検索", title: "建設業法", checked_on: checkedOn },
+                  source: { ...CONSTRUCTION_BUSINESS_LAW_SOURCE, checked_on: checkedOn },
                 },
               ],
-              related_rules: [{ parent_law_title: "建設業法", related_rule_hint: "施行令・施行規則と許可行政庁の案内を確認" }],
+              related_rules: [{ parent_law_title: CONSTRUCTION_BUSINESS_LAW_SOURCE.title, related_rule_hint: "施行令・施行規則と許可行政庁の案内を確認" }],
               warnings: ["候補法令は初期整理用です。具体的な業種区分・請負金額・人的体制に応じて条文と運用を確認してください"],
               meta: {
                 needs_human_review: true,
                 generated_at: new Date().toISOString(),
                 server_version: "0.1.0",
-                sources: [{ provider: "e-Gov 法令検索", title: "建設業法", checked_on: checkedOn }],
+                sources: [{ ...CONSTRUCTION_BUSINESS_LAW_SOURCE, checked_on: checkedOn }],
               },
             }, null, 2),
           }],
@@ -256,17 +260,27 @@ function createMcpServer(executeCaseWorkflow: ExecuteCaseWorkflow) {
               law_candidates: resolvedDomain === "general"
                 ? []
                 : [{
+                  law_id:
+                    resolvedDomain === "immigration"
+                      ? IMMIGRATION_CONTROL_LAW_SOURCE.law_id
+                      : resolvedDomain === "waste"
+                        ? WASTE_MANAGEMENT_LAW_SOURCE.law_id
+                        : undefined,
                   law_title:
                     resolvedDomain === "immigration"
-                      ? "出入国管理及び難民認定法"
+                      ? IMMIGRATION_CONTROL_LAW_SOURCE.title
                       : resolvedDomain === "waste"
-                        ? "廃棄物の処理及び清掃に関する法律"
+                        ? WASTE_MANAGEMENT_LAW_SOURCE.title
                         : "関連法令の個別確認が必要",
                   relevance_score: 0.8,
                   matched_terms: args.issues ?? [],
                   why_relevant: "相談分野に対応する主要法令の候補",
                   references: [],
-                  source: { provider: "e-Gov 法令検索", title: resolvedDomain === "immigration" ? "出入国管理及び難民認定法" : resolvedDomain === "waste" ? "廃棄物の処理及び清掃に関する法律" : "関連法令" },
+                  source: resolvedDomain === "immigration"
+                    ? { ...IMMIGRATION_CONTROL_LAW_SOURCE }
+                    : resolvedDomain === "waste"
+                      ? { ...WASTE_MANAGEMENT_LAW_SOURCE }
+                      : { provider: "e-Gov 法令検索", title: "関連法令" },
                 }],
               related_rules: [],
               warnings: ["補助ロジックでは候補法令を絞り切れていません。主解析または人間レビューで確認してください"],
