@@ -122,6 +122,19 @@ OPENROUTER_API_KEY="あなたのAPIキー"
 
 必要に応じて、モデル名や API の URL も `.env.local` で調整できます。
 
+公開環境で使う場合は、少なくとも次も見直してください。
+
+```env
+SERVER_HOST="127.0.0.1"
+APP_ALLOWED_ORIGINS="https://your-app.example.com"
+BASIC_AUTH_ENABLED="true"
+BASIC_AUTH_USERNAME="your-name"
+BASIC_AUTH_PASSWORD="strong-password"
+MCP_HTTP_ENABLED="false"
+```
+
+`SERVER_HOST` を `0.0.0.0` にするのは、外部公開が本当に必要なときだけにしてください。
+
 ### 4. 開発サーバーを起動する
 
 ```bash
@@ -181,6 +194,9 @@ http://localhost:3000
 
 - **ローカルで動かす**
   インターネット上に公開せず、自分のパソコン上で試すことです。
+
+- **公開時の最低限の防御**
+  外部公開するなら、許可する Origin を絞り、Basic 認証を有効にし、内部向け MCP HTTP 入口は閉じてください。
 
 ## 注意事項
 

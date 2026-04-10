@@ -45,17 +45,17 @@ export default function App() {
     if (!requestText.trim()) return;
     setError(null);
     setStage('analyzing');
+    let latestTimeline = buildPlaceholderTimeline();
+    let latestTrace: ProgressState['trace'] = null;
     setProgressState({
       status: 'running',
       message: '解析の準備をしています。',
-      timeline: buildPlaceholderTimeline(),
-      trace: null,
+      timeline: latestTimeline,
+      trace: latestTrace,
     });
 
     try {
       let finalWorkflow: WorkflowEvent['workflow'] | undefined;
-      let latestTimeline = buildPlaceholderTimeline();
-      let latestTrace: ProgressState['trace'] = null;
 
       await streamCaseWorkflow(
         {

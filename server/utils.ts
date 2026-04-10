@@ -1,3 +1,5 @@
+import { redactValue } from "./security.ts";
+
 export function serializeError(error: unknown) {
   if (error instanceof Error) {
     const plain = error as Error & { code?: string; cause?: unknown };
@@ -18,21 +20,25 @@ export function serializeError(error: unknown) {
 }
 
 export function logServerError(scope: string, error: unknown, details?: Record<string, unknown>) {
+  const serializedError = redactValue(serializeError(error));
   const payload = {
     level: "error",
     ts: new Date().toISOString(),
     scope,
-    ...serializeError(error),
-    ...(details ? { details } : {}),
+    ...(serializedError && typeof serializedError === "object" && !Array.isArray(serializedError)
+      ? serializedError
+      : { error: serializedError }),
+    ...(details ? { details: redactValue(details) } : {}),
   };
 
   console.error("[server:error]", JSON.stringify(payload, null, 2));
 }
 
 export function truncateForLog(value: unknown, maxLength = 1200): unknown {
-  const serialized = typeof value === "string" ? value : JSON.stringify(value);
+  const redacted = redactValue(value);
+  const serialized = typeof redacted === "string" ? redacted : JSON.stringify(redacted);
   if (!serialized) return value;
-  if (serialized.length <= maxLength) return value;
+  if (serialized.length <= maxLength) return redacted;
   return `${serialized.slice(0, maxLength)}... [truncated ${serialized.length - maxLength} chars]`;
 }
 
