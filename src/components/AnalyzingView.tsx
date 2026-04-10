@@ -76,7 +76,7 @@ export default function AnalyzingView({ progressState }: AnalyzingViewProps) {
           <div className="mb-6 flex items-center justify-between gap-4">
             <div>
               <p className="text-xs font-bold uppercase tracking-[0.25em] text-stone-400">解析トラック</p>
-              <h3 className="mt-2 text-2xl font-black">4段階の進み方をそのまま見せる</h3>
+              <h3 className="mt-2 text-2xl font-black">4段階進行</h3>
             </div>
             <div className="rounded-full bg-white/70 px-4 py-2 text-sm font-bold text-stone-600">
               ４段階で分析中

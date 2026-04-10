@@ -47,7 +47,7 @@ export default function DashboardView({
       setDraftCopied(true);
       window.setTimeout(() => setDraftCopied(false), 1600);
     } catch (copyError) {
-      console.error('返信案本文のコピーに失敗しました', copyError);
+      // エラーを無視
     }
   };
 
